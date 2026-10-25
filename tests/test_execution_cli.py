@@ -15,7 +15,9 @@ from typer.testing import CliRunner
 import cli.main as m
 import tradingagents.execution.simulator as sim
 from tests.test_execution import DAYS, FREE, _closes, _config
+from tradingagents.dataflows.errors import VendorUnavailableError
 from tradingagents.execution import PaperBroker, run_session
+from tradingagents.llm_clients.chatgpt_auth import ChatGPTAuthError
 from tradingagents.memory import TradingMemoryLog
 
 
@@ -100,3 +102,59 @@ def test_simulate_saves_a_long_run_id_or_a_spaced_log_name_by_default(source, tm
     assert result.exit_code == 0, result.output
     [saved] = (results / "simulations").glob("*/metrics.json")
     assert len(saved.parent.name) <= 32 and " " not in saved.parent.name
+
+
+# -- errors are one red line -------------------------------------------------------
+
+def _refused(result, message):
+    """Exit 1 through typer, not an exception escaping, with ``message`` as the one line."""
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
+    assert result.output.strip().splitlines() == [result.output.strip()] and message in result.output
+
+
+@pytest.mark.unit
+def test_a_price_outage_during_a_replay_is_one_red_line(tmp_path, monkeypatch):
+    def outage(ticker, start, end):
+        raise VendorUnavailableError("yahoo is throttling")
+
+    monkeypatch.setattr(sim, "get_closes", outage)
+    log = _one_buy_log(tmp_path / "trading_memory.md")
+    result = CliRunner().invoke(m.app, ["simulate", "--log", str(log), "--out", str(tmp_path / "out")])
+    _refused(result, "yahoo is throttling")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flag, value, message", [
+    ("--cash", "0", "--cash must be more than 0"),
+    ("--max-position", "0", "--max-position"),
+    ("--max-position", "1.5", "--max-position"),
+])
+def test_simulate_refuses_funding_no_account_can_trade_with(flag, value, message, tmp_path, monkeypatch):
+    monkeypatch.setattr(sim, "get_closes", _closes({"AAPL": dict(zip(DAYS, [100] * 5, strict=True))}))
+    log = _one_buy_log(tmp_path / "trading_memory.md")
+    _refused(CliRunner().invoke(m.app, ["simulate", "--log", str(log), flag, value]), message)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("args, message", [
+    (["simulate", "--run-id", "my run"], "not allowed in a filesystem path"),
+    (["paper", "--status", "--account", "my acct"], "not allowed in a filesystem path"),
+    (["paper", "--status", "--cash", "-5"], "--cash must be more than 0"),
+])
+def test_a_bad_account_name_or_funding_is_one_red_line(args, message, tmp_path, monkeypatch):
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(tmp_path))
+    _refused(CliRunner().invoke(m.app, args), message)
+    assert not (tmp_path / "paper").exists()       # no account was opened
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", [ChatGPTAuthError("sign in again: tradingagents login chatgpt"),
+                                   ImportError("install the bedrock extra"), KeyError("OPENAI_API_KEY")])
+def test_a_session_that_cannot_start_is_one_red_line(error, tmp_path, monkeypatch):
+    def cannot_start(names, broker, config, **kwargs):
+        raise error
+
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(tmp_path))
+    monkeypatch.setattr(m, "run_session", cannot_start)
+    monkeypatch.setattr(m, "get_splits", lambda ticker: pd.Series(dtype=float))
+    _refused(CliRunner().invoke(m.app, ["paper", "NVDA", "--account", "demo"]), str(error))

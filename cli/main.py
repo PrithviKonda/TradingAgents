@@ -18,6 +18,7 @@ from cli.prompts import (
 )
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
+from tradingagents.dataflows.errors import VendorError
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.market import get_closes, get_splits
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -197,12 +198,13 @@ def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out) -
         decisions = decisions_from_log(log_path)
         result = simulate_decisions(decisions, config, starting_cash=cash, end_date=end,
                                     benchmark=benchmark or None)
-    except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        saved = result.write(out) if out else None
+    except (OSError, ValueError, VendorError) as exc:   # a missing log, an unusable one, a price outage
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=1) from None
     console.print(escape(result.render()))
-    if out:
-        console.print(f"Equity curve, fills and metrics: {result.write(out)}")
+    if saved:
+        console.print(f"Equity curve, fills and metrics: {saved}")
 
 
 def _with_execution(config: dict, **overrides) -> dict:
@@ -225,17 +227,30 @@ def simulate(
     ),
 ):
     """Trade past decisions through a simulated account: equity curve, drawdown, Sharpe."""
-    if bool(run_id) == bool(log):
-        console.print("[red]Pass exactly one of --run-id or --log[/red]")
-        raise typer.Exit(code=1)
-    if run_id:
-        path = Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / safe_ticker_component(run_id) / "trading_memory.md"
-    else:
-        path = Path(log)
+    try:
+        if bool(run_id) == bool(log):
+            raise ValueError("Pass exactly one of --run-id or --log")
+        _check_funding(cash, max_position)
+        if run_id:
+            path = (Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / safe_ticker_component(run_id)
+                    / "trading_memory.md")
+        else:
+            path = Path(log)
+    except ValueError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from None
     if not out:
         # Saved under results_dir by default, where the dashboard looks for simulations.
         out = Path(DEFAULT_CONFIG["results_dir"]) / "simulations" / _simulation_name(run_id or path.stem)
     _print_simulation(path, cash, max_position, end, benchmark, out)
+
+
+def _check_funding(cash: float | None, max_position: float | None = None) -> None:
+    """Refuse a starting cash or position cap no account can trade with."""
+    if cash is not None and not cash > 0:
+        raise ValueError(f"--cash must be more than 0, got {cash:g}")
+    if max_position is not None and not 0 < max_position <= 1:
+        raise ValueError(f"--max-position is a share of equity, above 0 and at most 1; got {max_position:g}")
 
 
 def _simulation_name(label: str) -> str:
@@ -268,8 +283,10 @@ def _run_and_report(names, broker, kind, chosen, date, dry_run, confirm=None):
         steps = run_session(names, broker, DEFAULT_CONFIG, trade_date=date, asset_type=kind.value,
                             selected_analysts=chosen, confirm=confirm, submit=not dry_run,
                             progress=show_progress)
-    except (BrokerError, ValueError) as exc:
-        console.print(f"[red]{exc}[/red]")
+    except (typer.Abort, typer.Exit):
+        raise                       # the confirm prompt, interrupted: click reports it
+    except Exception as exc:  # a missing key, a lapsed ChatGPT sign-in, an extra not installed
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=1) from None
     console.print("")
     for step in steps:
@@ -298,9 +315,10 @@ def paper(
     An order fills at the first close after the analysis date, not the close the
     analysis read, so a later run (or --settle) fills what is pending.
     """
-    path = Path(DEFAULT_CONFIG["results_dir"]) / "paper" / f"{safe_ticker_component(account)}.json"
     execution = DEFAULT_CONFIG.get("execution", {})
     try:
+        _check_funding(cash)
+        path = Path(DEFAULT_CONFIG["results_dir"]) / "paper" / f"{safe_ticker_component(account)}.json"
         broker = PaperBroker.open(
             path, starting_cash=cash if cash is not None else float(execution.get("starting_cash", 100_000)),
             costs=CostModel.from_config(DEFAULT_CONFIG),
@@ -308,8 +326,8 @@ def paper(
             allow_fractional=bool(execution.get("allow_fractional", False)),
             splits=get_splits, fill_next_close=True,
         )
-    except BrokerError as exc:
-        console.print(f"[red]{exc}[/red]")
+    except (BrokerError, ValueError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=1) from None
 
     if not status:
