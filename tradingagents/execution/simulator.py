@@ -28,9 +28,10 @@ from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Fill
-from tradingagents.execution.paper import CostModel, PaperBroker
+from tradingagents.execution.paper import CostModel, PaperBroker, _Holding
 from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 from tradingagents.memory import TradingMemoryLog
+from tradingagents.portfolio import PortfolioContext, Position
 
 TRADING_DAYS = 252
 
@@ -116,8 +117,15 @@ def simulate(
     end_date: str | None = None,
     benchmark: str | None = "SPY",
     closes: CloseSource | None = None,
+    book: PortfolioContext | None = None,
 ) -> SimulationResult:
-    """Trade ``decisions`` through a fresh paper account and mark it daily to ``end_date``."""
+    """Trade ``decisions`` through a paper account and mark it daily to ``end_date``.
+
+    The account starts all cash, or, given ``book``, holding its positions
+    (valued at their last close on or before the first decision) and its cash
+    (``starting_cash`` when the book names none), so the decisions trade the
+    book they were made for. Returns are measured from that opening value.
+    """
     closes = closes or get_closes
     if not decisions:
         raise ValueError("there are no rated decisions to simulate")
@@ -126,19 +134,44 @@ def simulate(
     decisions = [replace(d, ticker=normalize_symbol(d.ticker)) for d in decisions]
     execution = config.get("execution", {})
     rules = SizingRules.from_config(config)
-    broker = PaperBroker(
-        cash=float(starting_cash if starting_cash is not None else execution.get("starting_cash", 100_000)),
-        costs=CostModel.from_config(config),
-        allow_short=bool(execution.get("allow_short", False)),
-        allow_fractional=rules.allow_fractional,
-    )
+    cash = float(starting_cash if starting_cash is not None else execution.get("starting_cash", 100_000))
+    held: dict[str, Position] = {}
+    for position in book.positions if book is not None else []:
+        if position.quantity:
+            held[normalize_symbol(position.ticker)] = position
+    if book is not None and book.cash is not None:
+        cash = float(book.cash)
 
     start = min(d.date for d in decisions)
     end = end_date or get_current_date()
     # get_closes excludes its end date, so ask for the day after.
     fetch_end = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    tickers = sorted({d.ticker for d in decisions})
-    prices = {t: _daily(closes(t, start, fetch_end)) for t in tickers}
+    # A held position is valued at its close on or before the start, so its
+    # closes are fetched from a little earlier.
+    lookback = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
+    tickers = sorted({d.ticker for d in decisions} | set(held))
+    prices = {t: _daily(closes(t, lookback if t in held else start, fetch_end)) for t in tickers}
+
+    last: dict[str, float] = {}
+    for ticker, position in held.items():
+        series = prices[ticker]
+        before = series[series.index <= pd.Timestamp(start)]
+        if not before.empty:
+            last[ticker] = float(before.iloc[-1])
+        elif position.average_price:
+            last[ticker] = float(position.average_price)
+        elif not series.empty:
+            last[ticker] = float(series.iloc[0])
+        else:
+            raise ValueError(f"no close to value the held {ticker} at")
+    broker = PaperBroker(
+        cash=cash,
+        starting_cash=cash + sum(p.quantity * last[t] for t, p in held.items()),
+        costs=CostModel.from_config(config),
+        allow_short=bool(execution.get("allow_short", False)),
+        allow_fractional=rules.allow_fractional,
+        holdings={t: _Holding(p.quantity, p.average_price or last[t]) for t, p in held.items()},
+    )
 
     # Each decision trades at the first session after its date in its own market.
     # Two decisions landing on one session (a weekend grid) collapse to the later one.
@@ -158,7 +191,6 @@ def simulate(
         raise ValueError(f"no closes after {start} for {', '.join(tickers)}")
 
     curve, exposure = {}, []
-    last: dict[str, float] = {}
     for day in calendar:
         for ticker, series in prices.items():
             if day in series.index:

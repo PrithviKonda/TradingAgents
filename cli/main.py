@@ -183,8 +183,9 @@ def backtest(
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
     if simulate_book and result.log_path.is_file():
         console.print("")
+        # The account opens holding the --portfolio book the sweep was rated against.
         _print_simulation(result.log_path, cash=None, max_position=None, end=None,
-                          benchmark="SPY", out=result.log_path.parent / "simulation")
+                          benchmark="SPY", out=result.log_path.parent / "simulation", book=book)
 
 
 def _tickers(text: str | None) -> list[str]:
@@ -192,12 +193,12 @@ def _tickers(text: str | None) -> list[str]:
     return list(dict.fromkeys(parse_ticker(t) for t in (text or "").split(",") if t.strip()))
 
 
-def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out) -> None:
+def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out, book=None) -> None:
     config = _with_execution(DEFAULT_CONFIG, max_position_pct=max_position)
     try:
         decisions = decisions_from_log(log_path)
         result = simulate_decisions(decisions, config, starting_cash=cash, end_date=end,
-                                    benchmark=benchmark or None)
+                                    benchmark=benchmark or None, book=book)
         saved = result.write(out) if out else None
     except (OSError, ValueError, VendorError) as exc:   # a missing log, an unusable one, a price outage
         console.print(f"[red]{escape(str(exc))}[/red]")
