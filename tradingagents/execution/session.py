@@ -13,7 +13,10 @@ human can look at the whole plan before anything is sent:
    that only reduces a position is never capped, so a grown position can exit.
 3. Ask ``confirm(plan)`` once, then send sells before buys, so the cash a sell
    frees can fund a buy in the same session. A sell that is refused frees
-   nothing, so the buys are cut again to the cash actually left.
+   nothing, so the buys are cut again to the cash actually left. At a broker
+   that only accepts an order (Alpaca), the session waits a bounded time for
+   the sells to fill and counts only what filled; the paper ledger fills its
+   queued sells before its buys, so a sell it accepted counts in full.
 """
 
 from __future__ import annotations
@@ -149,9 +152,7 @@ def run_session(
         return steps
     for step in sells:
         _send(broker, step, date)
-    freed = sum(s.fill.quantity * s.price for s in sells
-                if s.fill is not None and s.fill.status != "rejected")
-    _fund(buys, cash + freed, rules)
+    _fund(buys, cash + _freed(broker, sells, wait=any(s.order is not None for s in buys)), rules)
     for step in buys:
         if step.order is not None:
             _send(broker, step, date)
@@ -164,6 +165,23 @@ def _send(broker: Broker, step: SessionStep, date: str) -> None:
     except Exception as exc:  # a refused order is reported, and the rest still go
         logger.warning("Order for %s failed: %s", step.ticker, exc)
         step.error = str(exc)
+
+
+def _freed(broker: Broker, sells: list[SessionStep], wait: bool) -> float:
+    """The cash the session's sells freed for its buys."""
+    sent = [s for s in sells if s.fill is not None and s.fill.status != "rejected"]
+    wait_for_fills = getattr(broker, "wait_for_fills", None)
+    if wait_for_fills is None:
+        return sum(s.fill.quantity * s.price for s in sent)
+    if wait and sent:
+        try:
+            for step, fill in zip(sent, wait_for_fills([s.fill for s in sent]), strict=True):
+                step.fill = fill
+        except Exception as exc:  # unknown fills free nothing; the buys are cut instead
+            logger.warning("Could not confirm the sells' fills: %s", exc)
+            return 0.0
+    # An accepted order has freed nothing yet; only what filled is cash.
+    return sum(s.fill.quantity * s.price for s in sent if s.fill.status in ("filled", "partially_filled"))
 
 
 def _units(amount: float, price: float, rules: SizingRules) -> float:

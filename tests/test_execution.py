@@ -546,15 +546,20 @@ def test_one_failed_analysis_does_not_cancel_the_other_trades():
 
 
 def _alpaca(cash, equity, positions=(), cap=10_000, post=(200, {"id": "x", "status": "accepted"}),
-            open_orders=()):
-    session = _FakeSession({
+            open_orders=(), polled=None, sleep=None):
+    routes = {
         ("GET", "/v2/orders"): (200, list(open_orders)),
         ("GET", "/v2/account"): (200, {"cash": str(cash), "equity": str(equity), "currency": "USD"}),
         ("GET", "/v2/positions"): (200, [{"symbol": t, "qty": str(q), "avg_entry_price": "50"}
                                          for t, q in positions]),
         ("POST", "/v2/orders"): post,
-    })
-    return alpaca.AlpacaBroker(session=session, max_order_notional=cap), session
+    }
+    if polled is not None:
+        routes[("GET", "/v2/orders/x")] = polled
+    session = _FakeSession(routes)
+    broker = alpaca.AlpacaBroker(session=session, max_order_notional=cap,
+                                 sleep=sleep or (lambda seconds: None))
+    return broker, session
 
 
 def _alpaca_session(broker, ratings, confirm=None):
@@ -614,6 +619,38 @@ def test_a_refused_sell_leaves_its_buys_cut_to_the_cash_actually_there(keys):
     # The plan counted on the sell's 15,000; with it refused only 2,000 is there.
     assert steps["MSFT"].order == Order("MSFT", "buy", 40)
     assert [(o["side"], o["qty"]) for o in session.orders()] == [("sell", "300"), ("buy", "40")]
+
+
+@pytest.mark.unit
+def test_a_sell_alpaca_has_only_accepted_funds_no_buy(keys):
+    # Outside market hours the sell sits "accepted": its 15,000 is not cash yet.
+    slept = []
+    broker, session = _alpaca(cash=2_000, equity=100_000, positions=[("AAPL", 300)],
+                              polled=(200, {"id": "x", "status": "accepted", "filled_qty": "0"}),
+                              sleep=slept.append)
+    steps = {s.ticker: s for s in _alpaca_session(broker, {"AAPL": "Sell", "MSFT": "Buy"})}
+    assert steps["MSFT"].order == Order("MSFT", "buy", 40) and "2,000.00 cash" in steps["MSFT"].note
+    assert sum(slept) == 30 and steps["AAPL"].fill.status == "accepted"
+
+
+@pytest.mark.unit
+def test_a_sell_that_fills_while_the_session_waits_funds_the_buy(keys):
+    answers = iter([(200, {"id": "x", "status": "new", "filled_qty": "0"}),
+                    (200, {"id": "x", "status": "filled", "filled_qty": "300", "filled_avg_price": "50.5"})])
+    broker, session = _alpaca(cash=2_000, equity=100_000, positions=[("AAPL", 300)],
+                              polled=lambda body: next(answers))
+    steps = {s.ticker: s for s in _alpaca_session(broker, {"AAPL": "Sell", "MSFT": "Buy"})}
+    assert steps["AAPL"].fill.status == "filled" and steps["AAPL"].fill.price == 50.5
+    assert steps["MSFT"].order == Order("MSFT", "buy", 200)
+    assert [(o["side"], o["qty"]) for o in session.orders()] == [("sell", "300"), ("buy", "200")]
+
+
+@pytest.mark.unit
+def test_a_partly_filled_sell_frees_only_what_filled(keys):
+    broker, _ = _alpaca(cash=0, equity=100_000, positions=[("AAPL", 300)],
+                        polled=(200, {"id": "x", "status": "partially_filled", "filled_qty": "100"}))
+    steps = {s.ticker: s for s in _alpaca_session(broker, {"AAPL": "Sell", "MSFT": "Buy"})}
+    assert steps["MSFT"].order == Order("MSFT", "buy", 100)      # 100 sold at 50 is 5,000
 
 
 @pytest.mark.unit

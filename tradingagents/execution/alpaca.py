@@ -19,12 +19,19 @@ to Alpaca carry its own symbols. A class share is ``BRK-B`` here and ``BRK.B``
 there, and a crypto pair is ``BTC-USD`` here and ``BTC/USD`` there (Alpaca
 reports a crypto position as ``BTCUSD``). A crypto order is good till
 cancelled, as Alpaca requires; an equity order lasts the day.
+
+Alpaca answers an order with "accepted", not with its fill, so the cash a sell
+frees is not there yet when the response arrives. ``wait_for_fills`` polls the
+orders for a bounded time, and a session counts only what filled.
 """
 
 from __future__ import annotations
 
 import os
+import time
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 from zoneinfo import ZoneInfo
@@ -38,6 +45,8 @@ from tradingagents.portfolio import PortfolioContext, Position
 PAPER_URL = "https://paper-api.alpaca.markets"
 LIVE_URL = "https://api.alpaca.markets"
 LIVE_UNLOCK_ENV = "TRADINGAGENTS_LIVE_TRADING"
+# Order statuses after which an order never fills any further.
+FINAL_STATUSES = frozenset({"filled", "canceled", "expired", "rejected", "done_for_day"})
 
 
 def live_trading_unlocked() -> bool:
@@ -74,8 +83,8 @@ def client_order_id(order: Order) -> str:
 class AlpacaBroker:
     def __init__(self, paper: bool = True, key_id: str | None = None, secret_key: str | None = None,
                  max_order_notional: float | None = None, max_order_pct: float | None = None,
-                 timeout: float = 15.0,
-                 session: requests.Session | None = None):
+                 timeout: float = 15.0, session: requests.Session | None = None,
+                 sleep: Callable[[float], None] = time.sleep):
         if not paper and not live_trading_unlocked():
             raise BrokerError(
                 f"live trading is locked: set {LIVE_UNLOCK_ENV}=1 in the environment to "
@@ -93,6 +102,7 @@ class AlpacaBroker:
         self._equity: float | None = None      # as last reported, for max_order_pct
         self.timeout = timeout
         self._session = session or requests.Session()
+        self._sleep = sleep
         self._held: dict[str, float] = {}      # positions as last reported, for the cap
         self._session.headers.update({"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret_key})
 
@@ -181,4 +191,32 @@ class AlpacaBroker:
             date=date,
             status=placed.get("status", "accepted"),
             order_id=placed.get("id"),
+        )
+
+    def wait_for_fills(self, fills: list[Fill], timeout: float = 30.0, interval: float = 1.0) -> list[Fill]:
+        """``fills`` as Alpaca reports them once filled, or once ``timeout`` seconds pass.
+
+        An order still working at the deadline comes back with its last status,
+        and with the quantity filled so far if part of it filled.
+        """
+        latest = list(fills)
+        waited = 0.0
+        while True:
+            for index, fill in enumerate(latest):
+                if fill.order_id and fill.status not in FINAL_STATUSES:
+                    latest[index] = self._refresh(fill)
+            if all(not f.order_id or f.status in FINAL_STATUSES for f in latest) or waited >= timeout:
+                return latest
+            self._sleep(interval)
+            waited += interval
+
+    def _refresh(self, fill: Fill) -> Fill:
+        placed = self._request("GET", f"/v2/orders/{fill.order_id}")
+        filled_qty = float(placed.get("filled_qty") or 0)
+        filled_price = placed.get("filled_avg_price")
+        return replace(
+            fill,
+            quantity=filled_qty or fill.quantity,
+            price=float(filled_price) if filled_price else fill.price,
+            status=placed.get("status", fill.status),
         )
