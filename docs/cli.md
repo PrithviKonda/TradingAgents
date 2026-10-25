@@ -62,7 +62,7 @@ The provider, models, research depth and language come from prompts, or from
 | `--cash` | `execution.starting_cash` | Funding for a *new* account only |
 | `--date` | today | Analysis date; orders fill at the first close after it |
 | `--analysts` | all | As above |
-| `--asset-type` | auto | `stock` or `crypto`; without it, crypto when every ticker is a coin |
+| `--asset-type` | auto | `stock` or `crypto` for every ticker; without it, each ticker is detected on its own, so `NVDA,BTC-USD` runs NVDA with the stock analysts and BTC-USD with the crypto ones |
 | `--dry-run` | off | Analyze and plan, queue nothing |
 | `--settle` | off | Fill pending orders whose next close is in, and exit |
 | `--status` | off | Show the account, with pending orders, and exit |

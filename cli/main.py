@@ -268,25 +268,37 @@ def _simulation_name(label: str) -> str:
 
 
 def _session_analysts(analysts: str | None, asset_type: str | None, names: list[str]):
-    # Without --asset-type, a session of coins alone runs as crypto, as an
-    # analysis of one does; any stock among them keeps the stock analysts.
+    """Each ticker's asset type, and the analysts each type runs.
+
+    --asset-type sets one type for all; without it each ticker is detected on
+    its own, so NVDA,BTC-USD runs NVDA as a stock and BTC-USD as a coin, as an
+    analysis of either alone would. --analysts is checked against the stocks
+    when there are any, and a coin runs the ones it can.
+    """
     if asset_type:
         kind = AssetType(asset_type.strip().lower())
-    elif names and all(detect_asset_type(n) == AssetType.CRYPTO for n in names):
-        kind = AssetType.CRYPTO
+        kinds = dict.fromkeys(names, kind)
     else:
-        kind = AssetType.STOCK
-    chosen = (parse_analysts(analysts, kind) if analysts
-              else filter_analysts_for_asset_type(list(AnalystType), kind))
-    return kind, [a.value for a in chosen]
+        kinds = {n: detect_asset_type(n) for n in names}
+    present = set(kinds.values()) or {AssetType.STOCK}
+    widest = AssetType.STOCK if AssetType.STOCK in present else AssetType.CRYPTO
+    chosen = (parse_analysts(analysts, widest) if analysts
+              else filter_analysts_for_asset_type(list(AnalystType), widest))
+    per_kind = {}
+    for kind in present:
+        usable = filter_analysts_for_asset_type(chosen, kind)
+        if not usable:
+            raise ValueError(f"{', '.join(a.value for a in chosen)} is not available for {kind.value}")
+        per_kind[kind.value] = [a.value for a in usable]
+    return {n: k.value for n, k in kinds.items()}, per_kind
 
 
-def _run_and_report(names, broker, kind, chosen, date, dry_run, confirm=None):
+def _run_and_report(names, broker, kinds, chosen, date, dry_run, confirm=None):
     def show_progress(done, total, ticker):
         console.print(f"[dim][{done}/{total}] analyzing {ticker}[/dim]")
 
     try:
-        steps = run_session(names, broker, DEFAULT_CONFIG, trade_date=date, asset_type=kind.value,
+        steps = run_session(names, broker, DEFAULT_CONFIG, trade_date=date, asset_type=kinds,
                             selected_analysts=chosen, confirm=confirm, submit=not dry_run,
                             progress=show_progress)
     except (typer.Abort, typer.Exit):
@@ -310,7 +322,7 @@ def paper(
     date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD (default: today)"),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
     asset_type: str = typer.Option(
-        None, "--asset-type", help="stock or crypto (default: crypto when every ticker is a coin)"
+        None, "--asset-type", help="stock or crypto for every ticker (default: detected per ticker)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but record no fills"),
     status: bool = typer.Option(False, "--status", help="Show the account and exit"),
@@ -343,11 +355,11 @@ def paper(
             names = _tickers(tickers)
             if not names:
                 raise ValueError("No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL")
-            kind, chosen = _session_analysts(analysts, asset_type, names)
+            kinds, chosen = _session_analysts(analysts, asset_type, names)
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
-        _run_and_report(names, broker, kind, chosen, date, dry_run)
+        _run_and_report(names, broker, kinds, chosen, date, dry_run)
         # A past --date already has its next close: fill at it now.
         _settle_paper(broker)
         console.print("")
@@ -390,7 +402,7 @@ def trade(
     dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but send nothing"),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
     asset_type: str = typer.Option(
-        None, "--asset-type", help="stock or crypto (default: crypto when every ticker is a coin)"
+        None, "--asset-type", help="stock or crypto for every ticker (default: detected per ticker)"
     ),
 ):
     """Trade at a brokerage: its paper account by default, the live one with --live."""
@@ -401,7 +413,7 @@ def trade(
         names = _tickers(tickers)
         if not names:
             raise ValueError("No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL")
-        kind, chosen = _session_analysts(analysts, asset_type, names)
+        kinds, chosen = _session_analysts(analysts, asset_type, names)
         execution = DEFAULT_CONFIG.get("execution", {})
         broker = AlpacaBroker(paper=not live, max_order_notional=execution.get("max_order_notional"),
                               max_order_pct=execution.get("max_order_pct"))
@@ -419,7 +431,7 @@ def trade(
             return True
         return typer.confirm(f"Send these orders to {broker.name}?", default=False)
 
-    _run_and_report(names, broker, kind, chosen, None, dry_run, confirm=confirm)
+    _run_and_report(names, broker, kinds, chosen, None, dry_run, confirm=confirm)
 
 
 @app.command()

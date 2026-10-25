@@ -5,7 +5,9 @@ Alpaca live); everything else is the same. A session runs in three phases so a
 human can look at the whole plan before anything is sent:
 
 1. Analyze every ticker, each run seeing the broker's book as its portfolio
-   context, so the agents know what is held.
+   context, so the agents know what is held. Each ticker runs as its own asset
+   type, so a list mixing stocks and coins gives each the right analysts: one
+   graph is built per distinct analyst set and shared by the tickers that use it.
 2. Plan an order per decision from one equity figure, priced at the latest close.
    The plan already holds every limit an order is held to: a buy is cut to the
    per-order cap (``max_order_pct`` of equity, or the broker's
@@ -24,7 +26,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -78,19 +80,22 @@ def run_session(
     broker: Broker,
     config: dict,
     trade_date: str | None = None,
-    asset_type: str = "stock",
-    selected_analysts=("market", "social", "news", "fundamentals"),
+    asset_type: str | Mapping[str, str] = "stock",
+    selected_analysts: Sequence[str] | Mapping[str, Sequence[str]] = ("market", "social", "news", "fundamentals"),
     price: Callable[[str, str], float] = latest_close,
     confirm: Callable[[list[SessionStep]], bool] | None = None,
     submit: bool = True,
     progress: Callable[[int, int, str], None] | None = None,
     graph=None,
 ) -> list[SessionStep]:
-    """Run the session; with ``submit=False`` it stops after planning (a dry run)."""
-    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    """Run the session; with ``submit=False`` it stops after planning (a dry run).
 
+    ``asset_type`` is one type for every ticker, or a type per ticker (any
+    spelling; a ticker it leaves out is a stock). ``selected_analysts`` is one
+    analyst list, or a list per asset type. ``graph``, when given, runs every
+    ticker whatever its type.
+    """
     date = trade_date or get_current_date()
-    graph = graph or TradingAgentsGraph(list(selected_analysts), config=config)
     rules = SizingRules.from_config(config)
     book = broker.portfolio()
     # Canonical symbols, so BTCUSD and BTC-USD are one instrument and one
@@ -101,11 +106,21 @@ def run_session(
         key = normalize_symbol(held.ticker)
         holding[key] = holding.get(key, 0.0) + held.quantity
 
+    if isinstance(asset_type, Mapping):
+        types = {normalize_symbol(t): k for t, k in asset_type.items()}
+        kinds = {s.ticker: types.get(s.ticker, "stock") for s in steps}
+    else:
+        kinds = {s.ticker: asset_type for s in steps}
+    # Built before any analysis, so a setup error (a missing key) stops the whole session.
+    graphs = (dict.fromkeys(kinds.values(), graph) if graph
+              else _graphs(set(kinds.values()), selected_analysts, config))
+
     for index, step in enumerate(steps, 1):
         if progress:
             progress(index, len(steps), step.ticker)
         try:
-            _, step.rating = graph.propagate(step.ticker, date, asset_type, portfolio=book)
+            kind = kinds[step.ticker]
+            _, step.rating = graphs[kind].propagate(step.ticker, date, kind, portfolio=book)
             step.price = price(step.ticker, date)
         except Exception as exc:  # one ticker's outage must not cancel the others' trades
             logger.warning("Session step %s failed: %s", step.ticker, exc)
@@ -157,6 +172,20 @@ def run_session(
         if step.order is not None:
             _send(broker, step, date)
     return steps
+
+
+def _graphs(kinds: set[str], selected_analysts, config: dict) -> dict[str, object]:
+    """A graph per asset type; types that share an analyst list share one graph."""
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+    built: dict[tuple[str, ...], object] = {}
+    graphs = {}
+    for kind in sorted(kinds):
+        chosen = tuple(selected_analysts[kind] if isinstance(selected_analysts, Mapping) else selected_analysts)
+        if chosen not in built:
+            built[chosen] = TradingAgentsGraph(list(chosen), config=config)
+        graphs[kind] = built[chosen]
+    return graphs
 
 
 def _send(broker: Broker, step: SessionStep, date: str) -> None:

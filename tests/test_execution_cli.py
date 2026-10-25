@@ -78,7 +78,72 @@ def test_paper_hands_the_session_canonical_tickers_and_detects_a_coin(tmp_path, 
     monkeypatch.setattr(m, "get_splits", lambda ticker: pd.Series(dtype=float))
     result = CliRunner().invoke(m.app, ["paper", "btcusd,BTC-USD,ethusdt", "--account", "demo"])
     assert result.exit_code == 0, result.output
-    assert seen == {"names": ["BTC-USD", "ETH-USD"], "asset_type": "crypto"}
+    assert seen == {"names": ["BTC-USD", "ETH-USD"], "asset_type": {"BTC-USD": "crypto", "ETH-USD": "crypto"}}
+
+
+def _session_args(tmp_path, monkeypatch, *args):
+    seen = {}
+
+    def fake_run_session(names, broker, config, **kwargs):
+        seen.update(asset_type=kwargs["asset_type"], analysts=kwargs["selected_analysts"])
+        return []
+
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(tmp_path))
+    monkeypatch.setattr(m, "run_session", fake_run_session)
+    monkeypatch.setattr(m, "get_splits", lambda ticker: pd.Series(dtype=float))
+    return CliRunner().invoke(m.app, ["paper", *args, "--account", "demo"]), seen
+
+
+@pytest.mark.unit
+def test_a_mixed_list_runs_each_ticker_as_its_own_asset_type(tmp_path, monkeypatch):
+    result, seen = _session_args(tmp_path, monkeypatch, "NVDA,btcusd")
+    assert result.exit_code == 0, result.output
+    assert seen["asset_type"] == {"NVDA": "stock", "BTC-USD": "crypto"}
+    # The coin runs without the fundamentals analyst; the stock keeps it.
+    assert seen["analysts"] == {"stock": ["market", "social", "news", "fundamentals"],
+                                "crypto": ["market", "social", "news"]}
+
+
+@pytest.mark.unit
+def test_asset_type_still_sets_one_type_for_every_ticker(tmp_path, monkeypatch):
+    result, seen = _session_args(tmp_path, monkeypatch, "NVDA,BTC-USD", "--asset-type", "stock",
+                                 "--analysts", "market,fundamentals")
+    assert result.exit_code == 0, result.output
+    assert seen == {"asset_type": {"NVDA": "stock", "BTC-USD": "stock"},
+                    "analysts": {"stock": ["market", "fundamentals"]}}
+
+
+@pytest.mark.unit
+def test_analysts_no_coin_can_run_are_refused_in_a_mixed_list(tmp_path, monkeypatch):
+    result, seen = _session_args(tmp_path, monkeypatch, "NVDA,BTC-USD", "--analysts", "fundamentals")
+    assert result.exit_code == 1 and "not available for crypto" in result.output
+    assert seen == {}
+
+
+@pytest.mark.unit
+def test_a_session_builds_one_graph_per_analyst_set(monkeypatch):
+    import tradingagents.graph.trading_graph as tg
+
+    built = []
+
+    class _Graph:
+        def __init__(self, analysts, config):
+            self.analysts, self.runs = analysts, []
+            built.append(self)
+
+        def propagate(self, ticker, date, asset_type="stock", portfolio=None):
+            self.runs.append((ticker, asset_type))
+            return {}, "Hold"
+
+    monkeypatch.setattr(tg, "TradingAgentsGraph", _Graph)
+    broker = PaperBroker(cash=10_000, costs=FREE)
+    run_session(["NVDA", "btcusd", "AAPL"], broker, _config(), trade_date="2026-01-05",
+                asset_type={"NVDA": "stock", "BTCUSD": "crypto", "AAPL": "stock"},
+                selected_analysts={"stock": ["market", "fundamentals"], "crypto": ["market"]},
+                price=lambda t, d: 100.0)
+    runs = {tuple(g.analysts): g.runs for g in built}
+    assert runs == {("market", "fundamentals"): [("NVDA", "stock"), ("AAPL", "stock")],
+                    ("market",): [("BTC-USD", "crypto")]}
 
 
 # -- simulate's default output -----------------------------------------------------
