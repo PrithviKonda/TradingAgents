@@ -265,6 +265,26 @@ def test_walk_forward_refuses_too_little_history():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("volume", [0.0, 1e6, np.nan])
+def test_walk_forward_runs_on_a_series_without_volume(volume):
+    # Spot FX reports zero, constant or no volume; the rest of the features still carry.
+    bars = _bars(700).assign(Volume=volume)
+    assert M.technical_features(bars)["volume_z"].iloc[19:].eq(0).all()
+    result = M.walk_forward(bars, horizon=5, kind="logistic", min_train=252, step=63, importance=False)
+    assert result.probability.between(0, 1).all() and len(result.probability) > 0
+
+
+@pytest.mark.unit
+def test_walk_forward_names_a_feature_missing_from_long_history():
+    bars = _bars(700)
+    bars["Close"] = 100 * 1.001 ** np.arange(700)       # never falls, so RSI is undefined
+    with pytest.raises(ValueError, match=r"have 0 of 700 sessions; no value often enough for rsi_14$"):
+        M.walk_forward(bars, horizon=5)
+    with pytest.raises(ValueError, match=r"have 61 of 260 sessions$"):
+        M.walk_forward(_bars(260), horizon=5)
+
+
+@pytest.mark.unit
 def test_probability_above_interpolates_the_forecast_cdf():
     quantiles = {0.1: 90.0, 0.5: 100.0, 0.9: 110.0}
     assert M.probability_above(quantiles, 100.0) == pytest.approx(0.5)

@@ -56,7 +56,12 @@ def technical_features(bars: pd.DataFrame) -> pd.DataFrame:
     true_range = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     out["atr_14"] = true_range.rolling(14).mean() / close
     out["vol_21"] = close.pct_change().rolling(21).std() * math.sqrt(252)
-    out["volume_z"] = (volume - volume.rolling(20).mean()) / volume.rolling(20).std()
+    volume_std = volume.rolling(20).std()
+    volume_z = (volume - volume.rolling(20).mean()) / volume_std.where(volume_std > 0)
+    # Spot FX and some indices report no volume (zero, constant or missing):
+    # there is nothing to read in it, so the feature is neutral rather than
+    # undefined, which would drop every row. The 20-session warm-up stays NaN.
+    out["volume_z"] = volume_z.mask(volume_z.isna() & (np.arange(len(bars)) >= 19), 0.0)
     out["dist_sma50"] = close / close.rolling(50).mean() - 1
     out["dist_sma200"] = close / close.rolling(200).mean() - 1
     return out.replace([np.inf, -np.inf], np.nan)
@@ -122,8 +127,14 @@ def walk_forward(bars: pd.DataFrame, horizon: int = 5, kind: str = "mlp", min_tr
     data = features.assign(_fwd=forward).dropna(subset=list(features.columns))
     X, fwd = data[features.columns], data["_fwd"]
     label = (fwd > 0).astype(float).where(fwd.notna())
-    if len(X) < min_train + horizon + step:
-        raise ValueError(f"need at least {min_train + horizon + step} sessions with features, have {len(X)}")
+    need = min_train + horizon + step
+    if len(X) < need:
+        # Say whether the history is short or a feature is undefined over most of it.
+        sparse = [c for c in features.columns if features[c].notna().sum() < need]
+        detail = (f"; no value often enough for {', '.join(sparse)}"
+                  if sparse and len(bars) >= need else "")
+        raise ValueError(f"need at least {need} sessions with every feature defined, "
+                         f"have {len(X)} of {len(bars)} sessions{detail}")
 
     probability = pd.Series(np.nan, index=X.index, name="p_up")
     with warnings.catch_warnings():
