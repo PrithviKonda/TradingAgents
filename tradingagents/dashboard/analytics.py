@@ -19,6 +19,8 @@ from collections import deque
 import numpy as np
 import pandas as pd
 
+from tradingagents.memory.settlement import benchmark_return
+
 TRADING_DAYS = 252
 RATING_SCORE = {"Buy": 2, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -2}
 RATING_ORDER = list(RATING_SCORE)
@@ -251,7 +253,13 @@ def forward_returns(decisions: pd.DataFrame, closes: dict[str, pd.Series],
 
     Entry is the first close after the decision date; ``fwd_h`` is the return from
     there to ``h`` sessions later. A horizon that has not fully traded is NaN.
+    The benchmark leg is measured as settlement measures alpha, from its last
+    close by the entry to its last close by the exit, so a weekend entry in a
+    seven-day market is scored against the same dates the memory log scores it.
     """
+    if benchmark is not None:
+        benchmark = benchmark.dropna()
+        benchmark = benchmark[benchmark > 0].sort_index()
     rows = []
     for d in decisions.itertuples(index=False):
         series = closes.get(d.ticker)
@@ -267,10 +275,9 @@ def forward_returns(decisions: pd.DataFrame, closes: dict[str, pd.Series],
             if entry_index is not None and entry_index + h < len(series):
                 start, stop = series.index[entry_index], series.index[entry_index + h]
                 fwd = series.iloc[entry_index + h] / series.iloc[entry_index] - 1
-                if benchmark is not None:
-                    b = benchmark[(benchmark.index >= start) & (benchmark.index <= stop)]
-                    if len(b) >= 2:
-                        excess = fwd - (b.iloc[-1] / b.iloc[0] - 1)
+                bench_ret = benchmark_return(benchmark, start, stop) if benchmark is not None else None
+                if bench_ret is not None:
+                    excess = fwd - bench_ret
             row[f"fwd_{h}"], row[f"excess_{h}"] = fwd, excess
         rows.append(row)
     return pd.DataFrame(rows)

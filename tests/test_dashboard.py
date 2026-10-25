@@ -147,6 +147,30 @@ def test_forward_returns_enter_at_the_first_close_after_the_decision():
 
 
 @pytest.mark.unit
+def test_a_weekend_entry_is_scored_against_the_benchmark_as_settlement_scores_it(monkeypatch):
+    from tradingagents.memory import settlement
+
+    # A coin Buy dated Friday enters Saturday; SPY jumps 5% on the Monday after.
+    coin = pd.Series([100.0 + i for i in range(14)], index=pd.date_range("2026-01-02", periods=14, freq="D"))
+    weekdays = pd.bdate_range("2025-12-22", "2026-01-16")
+    spy = pd.Series([420.0 if day >= pd.Timestamp("2026-01-05") else 400.0 for day in weekdays], index=weekdays)
+
+    def closes(symbol, start, end):
+        series = {"BTC-USD": coin, "SPY": spy}[symbol]
+        return series[(series.index >= start) & (series.index < end)]
+
+    monkeypatch.setattr(settlement, "get_closes", closes)
+    _, alpha, _, _ = settlement.fetch_returns("BTC-USD", "2026-01-02", 5, "SPY")
+    fr = A.forward_returns(_decisions([("2026-01-02", "BTC-USD", "Buy")]), {"BTC-USD": coin}, spy,
+                           horizons=(1, 5))
+    row = fr.iloc[0]
+    assert row["excess_5"] == pytest.approx(alpha)
+    assert alpha == pytest.approx(106 / 101 - 1 - 0.05)
+    # Saturday to Sunday: SPY did not trade, so its leg is flat rather than missing.
+    assert row["excess_1"] == pytest.approx(102 / 101 - 1)
+
+
+@pytest.mark.unit
 def test_rating_statistics_ic_and_confusion():
     fr = pd.DataFrame({
         "date": pd.bdate_range("2026-01-05", periods=6), "ticker": ["X"] * 6,
