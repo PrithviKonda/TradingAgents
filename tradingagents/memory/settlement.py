@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from tradingagents.dataflows.symbols import normalize_symbol
-from tradingagents.dataflows.vendors.yahoo.market import get_closes
+from tradingagents.dataflows.vendors.yahoo.market import by_day, get_closes
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +35,19 @@ def resolve_benchmark(ticker: str, config: dict) -> str:
     return benchmark_map.get("", "SPY")
 
 
-def _by_day(closes):
-    """Closes keyed by the calendar day of their bar, missing closes dropped.
+def benchmark_return(bench, entry, exit_) -> float | None:
+    """The benchmark's return over a holding window from ``entry`` to ``exit_``.
 
-    Yahoo stamps a daily bar at midnight in its market's time zone (UTC for a
-    coin, New York for SPY), so two series meet on their dates, not their
-    instants. A missing or non-positive close is no price at all, not a bar to
-    score on.
+    The window is the instrument's own sessions; the benchmark is valued at its
+    last close by each end, so both returns span the same dates even when the
+    calendars differ (a coin trades at weekends, an index does not). ``bench``
+    is a series of positive closes in date order. None when it has no close by
+    the entry, or has not traded through the exit, where its close may yet move.
     """
-    closes = closes[closes > 0]
-    if getattr(closes.index, "tz", None) is not None:
-        closes = closes.tz_localize(None)
-    return closes
+    if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
+        return None
+    start, end = bench.asof(entry), bench.asof(exit_)
+    return float((end - start) / start)
 
 
 def fetch_returns(
@@ -74,11 +75,11 @@ def fetch_returns(
 
     # Closes for the instrument the analysis priced (XAUUSD -> GC=F, #984),
     # from the first session after the decision date.
-    stock = _by_day(get_closes(ticker, trade_date, end_str))
+    stock = by_day(get_closes(ticker, trade_date, end_str))
     stock = stock[stock.index > start]
     # From a week earlier, so the benchmark has a close on or before entry.
     bench_start = (start - timedelta(days=7)).strftime("%Y-%m-%d")
-    bench = _by_day(get_closes(benchmark, bench_start, end_str))
+    bench = by_day(get_closes(benchmark, bench_start, end_str))
 
     # Require the full holding window to have traded. A rerun before it has
     # leaves the entry pending to retry next run, rather than settling on a
@@ -86,16 +87,11 @@ def fetch_returns(
     if len(stock) <= holding_days:
         return None, None, None, None
     entry, exit_ = stock.index[0], stock.index[holding_days]
-    # The window is the stock's own sessions; the benchmark is valued at its
-    # last close by each end, so both returns span the same dates even when
-    # the calendars differ (a coin trades at weekends, an index does not).
-    # It must have traded through the exit, or its close there may yet move.
-    if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
+    bench_ret = benchmark_return(bench, entry, exit_)
+    if bench_ret is None:
         return None, None, None, None
 
     raw = float((stock.iloc[holding_days] - stock.iloc[0]) / stock.iloc[0])
-    bench_entry, bench_exit = bench.asof(entry), bench.asof(exit_)
-    bench_ret = float((bench_exit - bench_entry) / bench_entry)
     alpha = raw - bench_ret
     # Every close used is known by the exit: the point-in-time cutoff for
     # injecting the lesson (#1251).

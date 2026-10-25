@@ -42,9 +42,11 @@ def _validate_trade_date(trade_date) -> str:
 
 
 # Config keys that do not change what a run writes: where it keeps its files,
-# whether it checkpoints, and how often it retries a provider.
+# whether it checkpoints, how often it retries a provider, and how its rating
+# is later sized into orders (the agents never read ``execution``).
 _NOT_IN_SIGNATURE = frozenset({
     "results_dir", "data_cache_dir", "memory_log_path", "checkpoint_enabled", "llm_max_retries",
+    "execution",
 })
 
 
@@ -145,7 +147,8 @@ class TradingAgentsGraph:
         silently continuing the previous graph (#1089). The rest of the config
         counts too (provider, models, endpoint, language, vendors, limits): a
         resume must not carry reports that other settings produced. Only where
-        the run keeps its files and how it retries are left out.
+        the run keeps its files, how it retries, and the order sizing that
+        acts on its rating afterwards are left out.
         """
         settings = {k: v for k, v in self.config.items() if k not in _NOT_IN_SIGNATURE}
         digest = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode()).hexdigest()[:12]

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased]
+
+### Added
+
+- **Portfolio simulation.** `tradingagents simulate` (and `backtest --simulate`) trades a backtest's decisions through a simulated account, with slippage and commission, and reports the equity curve, return, Sharpe ratio, maximum drawdown and the benchmark's buy-and-hold. `tradingagents.execution.simulate` does the same from Python.
+- **Paper trading.** `tradingagents paper` analyzes tickers, sizes each rating against a local paper account and queues the orders; each fills at the first close after its analysis date, the rule the simulator and settlement use, when a later run or `paper --settle` finds that close. The account keeps its cash, positions, pending orders and fills between sessions, applies stock splits to its holdings, books one instrument under one symbol whatever its spelling (`BTCUSD` is `BTC-USD`), and is locked so overlapping sessions keep every fill. The agents see its holdings. A list mixing stocks and coins (`NVDA,BTC-USD`) runs each ticker as its own asset type, with that type's analysts, unless `--asset-type` sets one for all; `trade` does the same.
+- **Broker trading.** `tradingagents trade` sends the same plan to Alpaca, its paper account by default. A live account needs `--live` and `TRADINGAGENTS_LIVE_TRADING=1`; the plan shown for confirmation is already cut to the per-order cap and to the cash on hand, and a re-run counts the orders still open at Alpaca, so it cannot double one. Alpaca's symbols (`BRK.B`, `BTC/USD`) and crypto's time in force are handled, and buys are funded only from sells that actually filled.
+- The `execution` config block sets the per-position cap, the per-order cap (`max_order_pct` of equity, 2% by default, with an optional dollar ceiling `max_order_notional`), the target weight of each rating, slippage, commission, fractional shares and short selling. Every session, simulation and broker order is held to the same caps; a sell that only reduces a position is exempt, so it can always exit.
+- **Quant dashboard.** `tradingagents dashboard` opens a local Streamlit desk over saved simulations, paper accounts, decision logs and reports: portfolio statistics and charts, FIFO round-trip trades with excursions, decisions charted on candlesticks, signal quality (forward returns, hit rate, information coefficient, decay, confusion and transition matrices) and the research log. It listens on localhost only.
+- **Neural signals.** The dashboard's Models tab trains a walk-forward MLP on technical features, scored against a logistic baseline (AUC, Brier, calibration, permutation importance), and forecasts with the pretrained Chronos-Bolt transformer, backtested over past origins. Both can be overlaid on the price chart and compared with the agents' calls.
+
+### Upgrading
+
+- The dashboard and both networks are the optional `dashboard` extra: `pip install ".[dashboard]"` (or `pip install "tradingagents[dashboard]"`) installs Streamlit, Plotly, scikit-learn and Chronos (with PyTorch). A bare `pip install .` stays lean and installs on Intel Macs under Python 3.13, where PyTorch has no wheels; `tradingagents dashboard` without the extra prints the install command and exits 1. The Docker image leaves the extra out.
+
+### Changed
+
+- `tradingagents simulate` saves its results under `results_dir/simulations/` by default, where the dashboard finds them.
+- New documentation: a Getting Started walkthrough in the README, and guides in `docs/` for the CLI, every configuration setting, trading, and the dashboard.
+- CI's install, lint and time-zone jobs run on Python 3.13, and the repository pins 3.13 in `.python-version`.
+
 ## [0.7.0] — 2026-10-16
 
 Runs on your ChatGPT plan, backtests scored from the first close after each decision, a note at start-up when a newer release is out, and a wheel attached to each GitHub release.

@@ -11,7 +11,9 @@ must not grow one. Turning a rating into a filled order needs a quantity, a fill
 price and a cash ledger, none of which the system has; inventing them here would
 put an execution model behind an evaluation tool. Cells are therefore
 independent, and a portfolio, when given, is the same standing book for every
-cell rather than a position carried forward.
+cell rather than a position carried forward. To see what an account trading a
+sweep's decisions would have done, replay its log with
+``tradingagents.execution.simulate``, which holds that execution model.
 """
 
 from __future__ import annotations
