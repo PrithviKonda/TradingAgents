@@ -216,7 +216,9 @@ def build_default_config() -> dict:
             "slippage_bps": 5.0,
             "commission_per_order": 0.0,
             "commission_pct": 0.0,
-            # Real brokers refuse any single order above this notional; None disables.
+            # Largest single order sent to a real broker. A session cuts a larger
+            # buy to it, so a position grows in steps; a sell that only reduces a
+            # position is exempt, so it can always exit. None disables.
             "max_order_notional": 10_000.0,
         },
 

@@ -235,10 +235,15 @@ class _FakeSession:
     def __init__(self, routes):
         self.routes, self.headers, self.sent = routes, {}, []
 
-    def request(self, method, url, timeout=None, json=None):
+    def request(self, method, url, timeout=None, json=None, params=None):
         self.sent.append((method, url, json))
         path = url.split(".markets", 1)[1]
-        return _FakeResponse(*self.routes[(method, path)])
+        route = self.routes[(method, path)]
+        # A callable route answers per request, e.g. refusing only the sells.
+        return _FakeResponse(*(route(json) if callable(route) else route))
+
+    def orders(self):
+        return [body for method, url, body in self.sent if method == "POST"]
 
 
 @pytest.fixture
@@ -352,6 +357,62 @@ def test_one_failed_analysis_does_not_cancel_the_other_trades():
     steps, _ = _session(broker, {"AAPL": RuntimeError("vendor down"), "MSFT": "Buy"})
     assert steps[0].error == "vendor down"
     assert broker.quantity("MSFT") == 50
+
+
+def _alpaca(cash, equity, positions=(), cap=10_000, post=(200, {"id": "x", "status": "accepted"})):
+    session = _FakeSession({
+        ("GET", "/v2/account"): (200, {"cash": str(cash), "equity": str(equity), "currency": "USD"}),
+        ("GET", "/v2/positions"): (200, [{"symbol": t, "qty": str(q), "avg_entry_price": "50"}
+                                         for t, q in positions]),
+        ("POST", "/v2/orders"): post,
+    })
+    return alpaca.AlpacaBroker(session=session, max_order_notional=cap), session
+
+
+def _alpaca_session(broker, ratings, confirm=None):
+    config = {"execution": {"max_position_pct": 0.10, "min_trade_pct": 0}}
+    return run_session(list(ratings), broker, config, trade_date="2026-01-05",
+                       price=lambda t, d: 50.0, graph=_FakeGraph(ratings), confirm=confirm)
+
+
+@pytest.mark.unit
+def test_the_plan_shown_for_confirmation_is_already_cut_to_the_notional_cap(keys):
+    # 10% of 100,500 at 50 is 201 units, 10,050: over the 10,000 cap.
+    broker, session = _alpaca(cash=100_500, equity=100_500)
+    shown = []
+    steps = _alpaca_session(broker, {"NVDA": "Buy"}, confirm=lambda plan: shown.extend(
+        s.describe() for s in plan) or True)
+    assert steps[0].order == Order("NVDA", "buy", 200) and steps[0].error is None
+    assert "max_order_notional" in shown[0] and "buy 200" in shown[0]
+    assert [o["qty"] for o in session.orders()] == ["200"]
+
+
+@pytest.mark.unit
+def test_a_position_grown_past_the_cap_can_still_exit(keys):
+    # 300 units at 50 is 15,000, over the cap, but selling it only reduces risk.
+    broker, session = _alpaca(cash=2_000, equity=17_000, positions=[("AAPL", 300)])
+    steps = _alpaca_session(broker, {"AAPL": "Sell"})
+    assert steps[0].error is None and steps[0].note is None
+    assert [(o["side"], o["qty"]) for o in session.orders()] == [("sell", "300")]
+
+
+@pytest.mark.unit
+def test_a_refused_sell_leaves_its_buys_cut_to_the_cash_actually_there(keys):
+    refuse_sells = lambda body: ((403, {"message": "insufficient qty"}) if body["side"] == "sell"  # noqa: E731
+                                 else (200, {"id": "x", "status": "accepted"}))
+    broker, session = _alpaca(cash=2_000, equity=100_000, positions=[("AAPL", 300)], post=refuse_sells)
+    steps = {s.ticker: s for s in _alpaca_session(broker, {"AAPL": "Sell", "MSFT": "Buy"})}
+    assert "insufficient qty" in steps["AAPL"].error
+    # The plan counted on the sell's 15,000; with it refused only 2,000 is there.
+    assert steps["MSFT"].order == Order("MSFT", "buy", 40)
+    assert [(o["side"], o["qty"]) for o in session.orders()] == [("sell", "300"), ("buy", "40")]
+
+
+@pytest.mark.unit
+def test_a_plan_never_buys_more_than_the_cash_on_hand(keys):
+    broker, session = _alpaca(cash=1_000, equity=100_000)
+    steps = _alpaca_session(broker, {"MSFT": "Buy"})
+    assert steps[0].order == Order("MSFT", "buy", 20) and "cash available" in steps[0].note
 
 
 # -- CLI ---------------------------------------------------------------------------

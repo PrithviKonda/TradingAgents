@@ -50,6 +50,7 @@ class AlpacaBroker:
         self.max_order_notional = max_order_notional
         self.timeout = timeout
         self._session = session or requests.Session()
+        self._held: dict[str, float] = {}      # positions as last reported, for the cap
         self._session.headers.update({"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret_key})
 
     def _request(self, method: str, path: str, **kwargs):
@@ -75,6 +76,7 @@ class AlpacaBroker:
     def portfolio(self) -> PortfolioContext:
         account = self.account()
         positions = self._request("GET", "/v2/positions")
+        self._held = {p["symbol"].upper(): float(p["qty"]) for p in positions}
         return PortfolioContext(
             cash=float(account["cash"]),
             currency=account.get("currency", "USD"),
@@ -87,8 +89,12 @@ class AlpacaBroker:
         return float(self.account()["equity"])
 
     def submit(self, order: Order, price: float, date: str) -> Fill:
+        # The session already cut the plan to the cap; this is the backstop. A
+        # sell that only reduces a reported position is exempt, so it can exit.
+        held = max(self._held.get(order.ticker.upper(), 0.0), 0.0)
+        capped = order.quantity - min(order.quantity, held) if order.side == "sell" else order.quantity
         notional = order.quantity * price
-        if self.max_order_notional is not None and notional > self.max_order_notional:
+        if self.max_order_notional is not None and capped * price > self.max_order_notional + 1e-6:
             raise BrokerError(
                 f"{order.side} {order.quantity:g} {order.ticker} is about {notional:,.2f}, over the "
                 f"max_order_notional cap of {self.max_order_notional:,.2f}; not sent"
