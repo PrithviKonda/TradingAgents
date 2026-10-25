@@ -62,8 +62,15 @@ def _mtime(path: Path) -> float:
 # -- cached reads ----------------------------------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _closes_from_year(ticker: str, year: str, end: str) -> pd.Series:
+    return S.daily_closes(ticker, f"{year}-01-01", end)
+
+
 def closes(ticker: str, start: str, end: str) -> pd.Series:
-    return S.daily_closes(ticker, start, end)
+    # One fetch per ticker, year and end serves every window that starts in
+    # that year (marks, forward returns, a replay, a simulation), not one each.
+    series = _closes_from_year(ticker, start[:4], end)
+    return series[series.index >= pd.Timestamp(start)]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -111,23 +118,39 @@ def simulate_log(path: str, stamp: float, today: str, cash: float, max_position:
     return S.Account("simulation", result.equity, fills, result.benchmark, cash)
 
 
+class _Unpriced(Exception):
+    """A price fetch failed: the table is not cached, so the next rerun retries it."""
+
+
 def forward_table(decisions: pd.DataFrame, benchmark: str, today: str) -> pd.DataFrame:
-    # Not cached itself: the closes are, and a failed fetch is retried on the
-    # next rerun rather than kept as an empty series.
+    # Keyed on the three columns it reads, not the decisions' long text.
+    slim = decisions[["date", "ticker", "rating"]]
+    try:
+        return _forward_table(slim, benchmark, today)
+    except _Unpriced:
+        return _forward(slim, benchmark, today, strict=False)
+
+
+@st.cache_data(show_spinner=False)
+def _forward_table(decisions: pd.DataFrame, benchmark: str, today: str) -> pd.DataFrame:
+    return _forward(decisions, benchmark, today, strict=True)
+
+
+def _forward(decisions: pd.DataFrame, benchmark: str, today: str, strict: bool) -> pd.DataFrame:
     start = (decisions["date"].min() - timedelta(days=7)).strftime("%Y-%m-%d")
-    series = {}
-    for ticker in decisions["ticker"].unique():
+
+    def fetch(ticker):
         try:
-            series[ticker] = closes(ticker, start, today)
-        except Exception:  # an unpriced ticker scores nothing rather than stopping the page
-            series[ticker] = pd.Series(dtype=float)
-    bench = None
-    if benchmark:
-        try:
-            bench = closes(benchmark, start, today)
-        except Exception:  # without the benchmark, raw forward returns still score
-            bench = None
-    return A.forward_returns(decisions, series, bench)
+            return closes(ticker, start, today)
+        except Exception as exc:
+            if strict:
+                raise _Unpriced(ticker) from exc
+            return None
+
+    # An unpriced ticker scores nothing, and without the benchmark raw forward
+    # returns still score, rather than stopping the page.
+    series = {t: s if (s := fetch(t)) is not None else pd.Series(dtype=float) for t in decisions["ticker"].unique()}
+    return A.forward_returns(decisions, series, fetch(benchmark) if benchmark else None)
 
 
 @st.cache_data(show_spinner="Training the network walk-forward…")
@@ -149,6 +172,18 @@ def chronos_forecast(ticker: str, horizon: int, context: int, today: str) -> M.F
 def chronos_backtest(ticker: str, horizon: int, origins: int, spacing: int, today: str) -> pd.DataFrame:
     return M.chronos_backtest(bars(ticker, today)["Close"], horizon, origins, spacing,
                               pipeline=chronos_pipeline())
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _simulations(results_dir: str, stamp: float) -> dict[str, Path]:
+    return S.Sources(Path(results_dir)).simulations()
+
+
+def simulations(sources: S.Sources) -> dict[str, Path]:
+    # The listing walks all of results_dir, so it is kept a minute; a run saved
+    # to the default simulations/ folder changes the stamp and shows at once.
+    folder = sources.results_dir / "simulations"
+    return _simulations(str(sources.results_dir), _mtime(folder) if folder.is_dir() else 0.0)
 
 
 # -- charts ----------------------------------------------------------------------------
@@ -620,7 +655,7 @@ def main():
         columns=["date", "ticker", "rating", "pending", "raw", "alpha", "holding", "resolved", "decision",
                  "reflection"])
 
-    sims, papers = sources.simulations(), sources.paper_accounts()
+    sims, papers = simulations(sources), sources.paper_accounts()
     options = ["(none)"] + [f"simulation: {k}" for k in sims] + [f"paper: {k}" for k in papers]
     if log_path:
         options.insert(1, "simulate the selected log")
@@ -652,10 +687,15 @@ def main():
              "Research": lambda: research_page(decisions, sources), "Models": lambda: models_page(decisions)}
     for tab, render in zip(st.tabs(list(pages)), pages.values(), strict=True):
         with tab:
-            try:
-                render()
-            except Exception as exc:  # a failing tab shows its error; the tabs after it still render
-                st.exception(exc)
+            # A fragment, so a widget in one tab reruns that tab, not all six.
+            st.fragment(_tab)(render)
+
+
+def _tab(render) -> None:
+    try:
+        render()
+    except Exception as exc:  # a failing tab shows its error; the tabs after it still render
+        st.exception(exc)
 
 
 main()

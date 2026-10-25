@@ -612,6 +612,87 @@ def test_a_tab_that_fails_shows_its_error_and_the_tabs_after_it_render(tmp_path,
     assert [e.message for e in at.exception] == ["no signal", "no signal"]   # Signals, Signal quality
     assert any(s.value == "Analyst reports" for s in at.subheader)
     assert any(b.label == "Train and evaluate" for b in at.button)
+
+
+def _counting_closes(monkeypatch, fail=()):
+    """Wrap the app's close source to record each fetch, refusing the tickers in ``fail``."""
+    calls, inner = [], S.daily_closes
+
+    def daily_closes(ticker, start, end):
+        calls.append((ticker, start))
+        if ticker in fail:
+            raise OSError(f"{ticker} is down")
+        return inner(ticker, start, end)
+
+    monkeypatch.setattr(S, "daily_closes", daily_closes)
+    return calls
+
+
+@pytest.mark.unit
+def test_the_app_fetches_a_tickers_closes_once_per_year(tmp_path, monkeypatch):
+    from tradingagents.dataflows import date_window
+
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-02")
+    path = tmp_path / "paper" / "main.json"
+    broker = PaperBroker.open(path, starting_cash=10_000, costs=CostModel(slippage_bps=0))
+    broker.submit(Order("AAPL", "buy", 5), 100.0, "2026-01-06")
+    at = _app(tmp_path, monkeypatch)
+    calls = _counting_closes(monkeypatch)
+    at.run()
+    at.sidebar.selectbox[1].select("paper: main").run()
+    assert not at.exception
+    # The replay (from Jan 6) and the open position's mark (from Feb 20) share one fetch.
+    assert calls == [("AAPL", "2026-01-01")]
+
+
+def _saved_simulation(folder):
+    folder.mkdir(parents=True)
+    pd.DataFrame({"date": pd.bdate_range("2026-01-05", periods=5).strftime("%Y-%m-%d"),
+                  "equity": np.linspace(100_000, 101_000, 5)}).to_csv(folder / "equity.csv", index=False)
+    (folder / "metrics.json").write_text('{"starting_equity": 100000.0}', encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_a_simulation_saved_to_the_default_folder_is_listed_on_the_next_rerun(tmp_path, monkeypatch):
+    _saved_simulation(tmp_path / "simulations" / "first")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert "simulation: simulations/first" in at.sidebar.selectbox[1].options
+    _saved_simulation(tmp_path / "simulations" / "second")
+    at.run()
+    assert "simulation: simulations/second" in at.sidebar.selectbox[1].options
+
+
+@pytest.mark.unit
+def test_forward_returns_are_computed_once_while_the_log_is_unchanged(tmp_path, monkeypatch):
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("AAPL", "2026-06-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    computed, forward_returns = [], A.forward_returns
+    monkeypatch.setattr(A, "forward_returns", lambda *a, **k: computed.append(1) or forward_returns(*a, **k))
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert not at.exception
+    first = len(computed)
+    at.run()
+    assert first and len(computed) == first
+
+
+@pytest.mark.unit
+def test_forward_returns_that_could_not_be_priced_are_retried_not_kept(tmp_path, monkeypatch):
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("AAPL", "2026-06-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    calls = _counting_closes(monkeypatch, fail={"SPY"})
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    at.sidebar.selectbox[1].select("(none)").run()      # only the forward returns price SPY
+    assert not at.exception
+    tried = calls.count(("SPY", "2026-01-01"))
+    at.run()
+    assert tried and calls.count(("SPY", "2026-01-01")) > tried
+
+
 # -- the optional install --------------------------------------------------------------
 
 _DASHBOARD_STACK = ("streamlit", "plotly", "sklearn", "torch", "chronos")
