@@ -193,6 +193,30 @@ def test_metrics_and_benchmark():
 
 
 @pytest.mark.unit
+def test_a_lowercase_ticker_is_marked_to_market_like_its_canonical_form():
+    prices = _closes({"NVDA": dict(zip(DAYS, [100, 100, 110, 120, 130], strict=True))})
+    run = lambda ticker: simulate([Decision("2026-01-05", ticker, "Buy")], _config(),  # noqa: E731
+                                  starting_cash=10_000, end_date="2026-01-09", benchmark=None, closes=prices)
+    lower, upper = run("nvda"), run("NVDA")
+    assert lower.equity.tolist() == upper.equity.tolist()
+    assert lower.metrics["total_return"] > 0
+
+
+@pytest.mark.unit
+def test_backtest_hands_the_sweep_canonical_tickers(monkeypatch):
+    seen = {}
+
+    def fake_run_backtest(names, dates, config, **kwargs):
+        seen["names"] = names
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(m, "run_backtest", fake_run_backtest)
+    result = CliRunner().invoke(m.app, ["backtest", "nvda,btcusd", "--start", "2026-01-05",
+                                        "--end", "2026-01-05", "--simulate"])
+    assert seen["names"] == ["NVDA", "BTC-USD"], result.output
+
+
+@pytest.mark.unit
 def test_a_decision_with_no_later_close_is_reported_not_traded():
     prices = _closes({"AAPL": {"2026-01-05": 100, "2026-01-06": 101}})
     result = simulate([Decision("2026-01-05", "AAPL", "Buy"), Decision("2026-01-06", "AAPL", "Sell")],

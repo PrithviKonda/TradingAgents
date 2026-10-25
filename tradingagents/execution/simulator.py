@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -25,6 +25,7 @@ import pandas as pd
 
 from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Fill
 from tradingagents.execution.paper import CostModel, PaperBroker
@@ -120,6 +121,9 @@ def simulate(
     closes = closes or get_closes
     if not decisions:
         raise ValueError("there are no rated decisions to simulate")
+    # Keyed as the paper account keys its holdings, so "nvda" in a log is the
+    # NVDA position it bought and is marked to market, not valued at cost.
+    decisions = [replace(d, ticker=normalize_symbol(d.ticker)) for d in decisions]
     execution = config.get("execution", {})
     rules = SizingRules.from_config(config)
     broker = PaperBroker(

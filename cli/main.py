@@ -9,7 +9,7 @@ from rich.markup import escape
 
 from cli.display import console
 from cli.models import AnalystType, AssetType
-from cli.prompts import filter_analysts_for_asset_type, parse_analysts
+from cli.prompts import filter_analysts_for_asset_type, parse_analysts, parse_ticker
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.dataflows.symbols import safe_ticker_component
@@ -146,11 +146,11 @@ def backtest(
         # choice, every analyst the asset type allows runs.
         chosen = (parse_analysts(analysts, kind) if analysts
                   else filter_analysts_for_asset_type(list(AnalystType), kind))
+        names = _tickers(tickers)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
-    names = [t.strip() for t in tickers.split(",") if t.strip()]
     if not names:
         console.print("[red]No ticker to analyze; pass them comma-separated, e.g. NVDA,AAPL[/red]")
         raise typer.Exit(code=1)
@@ -177,6 +177,11 @@ def backtest(
         console.print("")
         _print_simulation(result.log_path, cash=None, max_position=None, end=None,
                           benchmark="SPY", out=result.log_path.parent / "simulation")
+
+
+def _tickers(text: str | None) -> list[str]:
+    """Comma-separated tickers, each canonical, so ``nvda`` and ``NVDA`` are one instrument."""
+    return list(dict.fromkeys(parse_ticker(t) for t in (text or "").split(",") if t.strip()))
 
 
 def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out) -> None:
