@@ -48,9 +48,6 @@ class Fill:
     status: str = "filled"     # "filled", or the venue's status for a working order
     order_id: str | None = None
 
-    def notional(self) -> float:
-        return self.quantity * (self.price or 0.0)
-
 
 class Broker(Protocol):
     name: str

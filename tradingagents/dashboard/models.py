@@ -288,7 +288,6 @@ def probability_above(quantiles: dict[float, float], price: float) -> float:
 @dataclass
 class Forecast:
     bands: pd.DataFrame        # one row per future session: q10..q90 and mean
-    last_close: float
     prob_up: float             # P(close at the horizon > last close)
     expected_return: float     # median at the horizon against the last close
 
@@ -307,7 +306,7 @@ def chronos_forecast(closes: pd.Series, horizon: int = 20, context: int = 512,
     bands["mean"] = np.asarray(mean[0])
     last = float(history.iloc[-1])
     final = {lv: float(bands[f"q{round(lv * 100)}"].iloc[-1]) for lv in QUANTILES}
-    return Forecast(bands, last, probability_above(final, last), final[0.5] / last - 1)
+    return Forecast(bands, probability_above(final, last), final[0.5] / last - 1)
 
 
 def chronos_backtest(closes: pd.Series, horizon: int = 5, origins: int = 36, spacing: int = 10,

@@ -94,7 +94,6 @@ class AlpacaBroker:
         secret_key = secret_key or os.getenv("APCA_API_SECRET_KEY")
         if not key_id or not secret_key:
             raise BrokerError("Alpaca keys are missing: set APCA_API_KEY_ID and APCA_API_SECRET_KEY")
-        self.paper = paper
         self.name = "alpaca-paper" if paper else "alpaca-live"
         self.base_url = PAPER_URL if paper else LIVE_URL
         self.max_order_notional = max_order_notional
