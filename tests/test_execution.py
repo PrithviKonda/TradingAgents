@@ -392,3 +392,18 @@ def test_trade_refuses_live_without_the_unlock(monkeypatch):
     monkeypatch.delenv(alpaca.LIVE_UNLOCK_ENV, raising=False)
     result = CliRunner().invoke(m.app, ["trade", "AAPL", "--live", "--yes"])
     assert result.exit_code == 1 and "live trading is locked" in result.output
+
+
+@pytest.mark.unit
+def test_simulate_saves_under_results_dir_by_default(tmp_path, monkeypatch):
+    # The dashboard lists simulations found under results_dir, so that is where they go.
+    path = tmp_path / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(path)}).store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    import tradingagents.execution.simulator as sim
+
+    monkeypatch.setattr(sim, "get_closes", _closes({"AAPL": dict(zip(DAYS, [100] * 5, strict=True))}))
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+    result = CliRunner().invoke(m.app, ["simulate", "--log", str(path), "--end", "2026-01-09", "--benchmark", ""])
+    assert result.exit_code == 0, result.output
+    saved = list((tmp_path / "results" / "simulations").glob("trading_memory_*/metrics.json"))
+    assert len(saved) == 1

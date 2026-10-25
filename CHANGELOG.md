@@ -23,6 +23,8 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 
 ### Changed
 
+- `tradingagents simulate` saves its results under `results_dir/simulations/` by default, where the dashboard finds them.
+- New documentation: a Getting Started walkthrough in the README, and guides in `docs/` for the CLI, every configuration setting, trading, and the dashboard.
 - CI's install, lint and time-zone jobs run on Python 3.13, and the repository pins 3.13 in `.python-version`.
 
 ## [0.7.0] — 2026-10-16

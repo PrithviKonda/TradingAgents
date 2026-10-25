@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -206,7 +207,10 @@ def simulate(
     max_position: float = typer.Option(None, "--max-position", help="Largest position as a share of equity, e.g. 0.1"),
     end: str = typer.Option(None, "--end", help="Mark the account to this date, YYYY-MM-DD (default: today)"),
     benchmark: str = typer.Option("SPY", "--benchmark", help="Buy-and-hold comparison; empty to skip"),
-    out: str = typer.Option(None, "--out", help="Directory for equity.csv, fills.csv and metrics.json"),
+    out: str = typer.Option(
+        None, "--out",
+        help="Directory for equity.csv, fills.csv and metrics.json (default: results_dir/simulations/<name>)",
+    ),
 ):
     """Trade past decisions through a simulated account: equity curve, drawdown, Sharpe."""
     if bool(run_id) == bool(log):
@@ -216,6 +220,10 @@ def simulate(
         path = Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / safe_ticker_component(run_id) / "trading_memory.md"
     else:
         path = Path(log)
+    if not out:
+        # Saved under results_dir by default, where the dashboard looks for simulations.
+        name = f"{run_id or path.stem}_{datetime.now():%Y%m%d_%H%M%S}"
+        out = Path(DEFAULT_CONFIG["results_dir"]) / "simulations" / safe_ticker_component(name)
     _print_simulation(path, cash, max_position, end, benchmark, out)
 
 

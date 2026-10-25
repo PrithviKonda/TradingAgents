@@ -58,13 +58,75 @@ Full release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 <div align="center">
 
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
+🧭 [Getting Started](#getting-started) | 📚 [Docs](docs/README.md) | 🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
 
 </div>
 
 > 🎉 **TradingAgents** officially released! We have received numerous inquiries about the work, and we would like to express our thanks for the enthusiasm in our community.
 >
 > So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
+
+## Getting Started
+
+This fork adds backtest simulation, paper trading, Alpaca brokerage trading and a quant dashboard on top of the TradingAgents framework. Here is the whole workflow, from install to a live order.
+
+**1. Install (Python 3.13).**
+```bash
+git clone https://github.com/PrithviKonda/TradingAgents.git && cd TradingAgents
+uv venv --python 3.13 && source .venv/bin/activate     # or: conda create -n tradingagents python=3.13
+uv pip install .                                        # or: pip install .
+```
+The install includes the dashboard and its neural-network models, which bring PyTorch, a download of over 1 GB.
+
+**2. Add keys.** Copy `.env.example` to `.env` and set the key for your LLM provider, e.g. `OPENAI_API_KEY`. Optional extras: `FRED_API_KEY` for macro data, and `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` for Alpaca.
+
+**3. Analyze one ticker.**
+```bash
+tradingagents                                   # interactive
+tradingagents --ticker NVDA --date 2026-10-23 --analysts market,news,fundamentals --save
+```
+Analysts, researchers, a trader, risk debaters and a portfolio manager work through the ticker and end with a rating: **Buy, Overweight, Hold, Underweight or Sell**.
+
+**4. Backtest and simulate.** Run the agents over a date grid, score each call, and trade the calls through a simulated account:
+```bash
+tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-09-01 --every 7 --simulate
+tradingagents simulate --run-id <id printed above> --cash 50000 --max-position 0.2
+```
+Every grid cell is a full LLM run, so start small.
+
+**5. Paper trade forward.**
+```bash
+tradingagents paper NVDA,AAPL           # analyze, size and fill in a local paper account
+tradingagents paper --status
+```
+
+**6. Study it in the dashboard.**
+```bash
+tradingagents dashboard
+```
+The dashboard has six tabs:
+- **Portfolio:** equity, drawdown, Sharpe, beta and alpha.
+- **Trades:** FIFO round trips with MAE and MFE.
+- **Signals:** price charts with each decision marked.
+- **Signal quality:** hit rate, t-stat and information coefficient by rating, and how fast the edge decays.
+- **Research:** decisions and their reflections.
+- **Models:** a walk-forward neural network and Amazon's Chronos forecaster, scored out of sample.
+
+**7. Trade at a broker.** Use Alpaca's paper account first, then live, which needs two explicit confirmations:
+```bash
+tradingagents trade AAPL --dry-run
+tradingagents trade AAPL
+TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade AAPL --live
+```
+
+| Want to… | Read |
+|---|---|
+| See every command and flag | [CLI reference](docs/cli.md) |
+| Change models, position size, costs or vendors | [Configuration reference](docs/configuration.md) |
+| Understand how a rating becomes an order, and live safety | [Trading guide](docs/trading.md) |
+| Interpret every chart and metric | [Dashboard guide](docs/dashboard.md) |
+
+**Changing values, in short:** standing defaults live in `tradingagents/default_config.py`. The `execution` block there holds the position cap, rating weights, slippage, commission, fractional shares, shorting and the broker order cap. Provider, models, paths and debate depth can also be set in `.env` with `TRADINGAGENTS_*` variables. Per-run choices are CLI flags such as `--cash` and `--max-position`, or the dashboard's sidebar sliders.
 
 ## TradingAgents Framework
 
@@ -122,7 +184,7 @@ git clone https://github.com/TauricResearch/TradingAgents.git
 cd TradingAgents
 ```
 
-TradingAgents needs Python 3.11 or later. Create a virtual environment in any of your favorite environment managers:
+TradingAgents runs on Python 3.11 or later; this repository targets Python 3.13. Create a virtual environment in any of your favorite environment managers:
 ```bash
 conda create -n tradingagents python=3.13
 conda activate tradingagents
@@ -294,7 +356,7 @@ config["deep_think_llm"] = "claude-opus-5-5"
 
 A tier on its own provider uses that provider's key and default endpoint; set `quick_think_backend_url` or `deep_think_backend_url` for a local or relay endpoint. The `TRADINGAGENTS_DEEP_THINK_PROVIDER` and `TRADINGAGENTS_QUICK_THINK_PROVIDER` variables set them for the CLI, together with the tier's model variable.
 
-See `tradingagents/default_config.py` for all configuration options.
+Every configuration option is listed, with its meaning and how to change it, in the [configuration reference](docs/configuration.md).
 
 ### Fundamentals as filed
 
@@ -389,7 +451,7 @@ Each cell is scored on realized alpha against the instrument's regional benchmar
 
 ```bash
 tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7 --simulate
-tradingagents simulate --run-id 20260801_120000 --cash 50000 --max-position 0.2 --out ./sim
+tradingagents simulate --run-id 20260801_120000 --cash 50000 --max-position 0.2   # saved under results_dir/simulations/
 ```
 
 ```python
@@ -416,6 +478,8 @@ tradingagents trade NVDA,AAPL                 # Alpaca paper
 TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade NVDA --live   # real money
 ```
 
+The [trading guide](docs/trading.md) covers sizing with a worked example, simulation timing and Alpaca setup step by step.
+
 Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither a habitual flag nor a copied config can place a real order on its own. Orders over `execution.max_order_notional` (10,000 by default) are refused before they are sent, and each order's client id is built from the date, ticker and side, so re-running a session the same day cannot double an order. Orders are market orders sized at the latest close; the fill comes at the market's price.
 
 ## Dashboard and neural signals
@@ -435,6 +499,8 @@ Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither 
 tradingagents dashboard
 tradingagents dashboard --results-dir ~/.tradingagents/logs --port 8502
 ```
+
+Every metric is defined, with how to read it, in the [dashboard guide](docs/dashboard.md).
 
 Both networks install with TradingAgents. Chronos downloads its weights (about 180 MB) from Hugging Face the first time it forecasts. On daily technical features alone, neither network should be expected to beat a coin flip by much; the Models tab exists to show you whether they do, on your instrument, before you let them inform a trade.
 
