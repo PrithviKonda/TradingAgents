@@ -480,6 +480,24 @@ def test_a_failed_overlay_warns_and_the_other_tabs_still_render(tmp_path, monkey
 
 
 @pytest.mark.unit
+def test_the_benchmark_defaults_to_the_configured_one(tmp_path, monkeypatch):
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("7203.T", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert at.sidebar.text_input[0].value == "SPY"
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert at.sidebar.text_input[0].value == "^N225"        # the log's own market
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "benchmark_ticker", "QQQ")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert at.sidebar.text_input[0].value == "QQQ"
+
+
+@pytest.mark.unit
 def test_a_tab_that_fails_shows_its_error_and_the_tabs_after_it_render(tmp_path, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("no signal")

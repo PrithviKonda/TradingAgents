@@ -24,6 +24,7 @@ from tradingagents.dashboard import analytics as A, models as M, sources as S
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.execution import Decision, simulate
+from tradingagents.memory.settlement import resolve_benchmark
 
 RATING_COLORS = {"Buy": "#0b8a5f", "Overweight": "#5cc49a", "Hold": "#8a939b",
                  "Underweight": "#e8964a", "Sell": "#c8423a", "REVIEW": "#6c5ce7"}
@@ -44,6 +45,13 @@ def pct(value, digits: int = 2) -> str:
 
 def num(value, digits: int = 2) -> str:
     return "—" if value is None or (isinstance(value, float) and not np.isfinite(value)) else f"{value:,.{digits}f}"
+
+
+def default_benchmark(decisions: pd.DataFrame) -> str:
+    """The benchmark settlement would use: the configured ``benchmark_ticker``, else the
+    index of the market every ticker in the log trades on, else the default market's."""
+    found = {resolve_benchmark(t, DEFAULT_CONFIG) for t in decisions["ticker"].unique()}
+    return found.pop() if len(found) == 1 else resolve_benchmark("", DEFAULT_CONFIG)
 
 
 def _mtime(path: Path) -> float:
@@ -618,7 +626,7 @@ def main():
     if log_path:
         options.insert(1, "simulate the selected log")
     choice = st.sidebar.selectbox("Account", options, index=1 if len(options) > 1 else 0)
-    benchmark = st.sidebar.text_input("Benchmark", "SPY").strip().upper()
+    benchmark = st.sidebar.text_input("Benchmark", default_benchmark(decisions)).strip().upper()
 
     account = None
     try:
