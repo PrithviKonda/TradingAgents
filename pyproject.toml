@@ -28,6 +28,13 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=1.7.0",
+    # The quant dashboard (`tradingagents dashboard`) and its two neural signal
+    # models: a walk-forward scikit-learn MLP and the pretrained Chronos-Bolt
+    # forecaster (which brings torch).
+    "streamlit>=1.40",
+    "plotly>=5.24",
+    "scikit-learn>=1.5",
+    "chronos-forecasting>=2.0",
 ]
 
 [project.optional-dependencies]

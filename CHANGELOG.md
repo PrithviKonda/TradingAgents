@@ -14,6 +14,12 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 - **Paper trading.** `tradingagents paper` analyzes tickers, sizes each rating against a local paper account and fills it at the latest close. The account keeps its cash, positions and fills between sessions, and the agents see its holdings.
 - **Broker trading.** `tradingagents trade` sends the same plan to Alpaca, its paper account by default. A live account needs `--live` and `TRADINGAGENTS_LIVE_TRADING=1`; orders over `execution.max_order_notional` are refused, and a session re-run on the same day cannot double an order.
 - The `execution` config block sets the per-position cap, the target weight of each rating, slippage, commission, fractional shares and short selling.
+- **Quant dashboard.** `tradingagents dashboard` opens a local Streamlit desk over saved simulations, paper accounts, decision logs and reports: portfolio statistics and charts, FIFO round-trip trades with excursions, decisions charted on candlesticks, signal quality (forward returns, hit rate, information coefficient, decay, confusion and transition matrices) and the research log. It listens on localhost only.
+- **Neural signals.** The dashboard's Models tab trains a walk-forward MLP on technical features, scored against a logistic baseline (AUC, Brier, calibration, permutation importance), and forecasts with the pretrained Chronos-Bolt transformer, backtested over past origins. Both can be overlaid on the price chart and compared with the agents' calls.
+
+### Upgrading
+
+- `pip install .` now also installs Streamlit, Plotly, scikit-learn and Chronos (with PyTorch), so the dashboard and both networks work out of the box.
 
 ### Changed
 

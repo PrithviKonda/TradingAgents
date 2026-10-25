@@ -329,6 +329,33 @@ def trade(
     _run_and_report(names, broker, kind, chosen, None, dry_run, confirm=confirm)
 
 
+@app.command()
+def dashboard(
+    port: int = typer.Option(8501, "--port", help="Port to serve the dashboard on"),
+    results_dir: str = typer.Option(None, "--results-dir", help="Read runs and accounts from here (default: results_dir)"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Serve without opening a browser"),
+    address: str = typer.Option(
+        "localhost", "--address", help="Interface to listen on; 0.0.0.0 shares your accounts with the network"
+    ),
+):
+    """Open the quant dashboard: trades, signals, research and neural models."""
+    import subprocess
+    from importlib.resources import files
+
+    app_path = str(files("tradingagents.dashboard").joinpath("app.py"))
+    # Streamlit listens on every interface by default; the dashboard shows your
+    # accounts, so it stays on this machine unless asked otherwise.
+    command = [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(port),
+               "--server.address", address,
+               "--server.headless", "true" if no_browser else "false", "--browser.gatherUsageStats", "false"]
+    if results_dir:
+        command += ["--", "--results-dir", results_dir]
+    try:
+        raise typer.Exit(code=subprocess.call(command))
+    except KeyboardInterrupt:
+        raise typer.Exit(code=0) from None
+
+
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
 Plan = StrEnum("Plan", {name: name for name in SIGNED_IN_PROVIDERS})
 

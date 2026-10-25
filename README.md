@@ -418,6 +418,26 @@ TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade NVDA --live   # real money
 
 Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither a habitual flag nor a copied config can place a real order on its own. Orders over `execution.max_order_notional` (10,000 by default) are refused before they are sent, and each order's client id is built from the date, ticker and side, so re-running a session the same day cannot double an order. Orders are market orders sized at the latest close; the fill comes at the market's price.
 
+## Dashboard and neural signals
+
+`tradingagents dashboard` opens a local quant desk in the browser over everything saved under `results_dir`: simulations, paper accounts, backtest decision logs and analyst reports. It listens on `localhost` only (`--address` to change that, `--results-dir` to read another folder).
+
+- **Portfolio**: return, CAGR, Sharpe, Sortino, Calmar, maximum drawdown, beta and alpha against the benchmark; the equity curve beside the rebased benchmark, the underwater curve, rolling Sharpe and volatility, gross exposure and a monthly-returns heatmap. A decision log can be simulated right there under any cash, position cap, slippage and commission.
+- **Trades**: open positions with unrealized P&L, closed trades matched first-in first-out with maximum adverse and favourable excursion, win rate, profit factor and expectancy, and the full blotter as CSV.
+- **Signals**: candlesticks with volume, each decision marked by rating with its forward returns on hover, the fills that followed, moving averages, and optionally the neural network's probability and the Chronos forecast band.
+- **Signal quality**: forward returns of every decision at 1, 5, 10 and 20 sessions, raw or over the benchmark; hit rate, mean and t-statistic by rating; information coefficient overall and rolling; decay with horizon; called-against-realized direction; rating transitions; and whether the neural network agreeing with a call made it more likely to be right.
+- **Research**: the decision log with each decision and its later reflection, and the saved analyst reports.
+- **Models**: two neural signals, each scored out of sample before you rely on it.
+  - A **walk-forward MLP** (scikit-learn) learns the sign of the forward return from technical features: returns over five windows, RSI, MACD, Bollinger %B, ATR, realized volatility, volume and distance from the 50- and 200-session averages. It is refit on an expanding window and only trained on rows whose outcome was known when it predicts. It is shown against a logistic-regression baseline with AUC, Brier score against the base rate, calibration and permutation importance.
+  - **Chronos-Bolt**, Amazon's pretrained time-series transformer, forecasts the price path zero-shot as quantile bands. Its implied probability of a higher close is backtested over past origins, with hit rate, AUC and band coverage.
+
+```bash
+tradingagents dashboard
+tradingagents dashboard --results-dir ~/.tradingagents/logs --port 8502
+```
+
+Both networks install with TradingAgents. Chronos downloads its weights (about 180 MB) from Hugging Face the first time it forecasts. On daily technical features alone, neither network should be expected to beat a coin flip by much; the Models tab exists to show you whether they do, on your instrument, before you let them inform a trade.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
