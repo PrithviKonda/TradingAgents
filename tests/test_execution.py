@@ -290,6 +290,15 @@ def test_alpaca_reports_the_book_and_places_a_market_order(keys):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("quantity, sent", [(12.3456789, "12.3456789"), (1_234_567, "1234567"),
+                                            (2.0, "2"), (0.1234567891234, "0.123456789")])
+def test_alpaca_quantities_are_sent_exactly_and_never_rounded_up(keys, quantity, sent):
+    session = _FakeSession({("POST", "/v2/orders"): (200, {"id": "abc", "status": "accepted"})})
+    alpaca.AlpacaBroker(session=session).submit(Order("AAPL", "sell", quantity), 1.0, "2026-01-05")
+    assert session.orders()[0]["qty"] == sent
+
+
+@pytest.mark.unit
 def test_every_order_attempt_gets_its_own_client_order_id(keys):
     # Alpaca refuses a reused id, so a retry after a rejection must not reuse one.
     session = _FakeSession({("POST", "/v2/orders"): (200, {"id": "abc", "status": "accepted"})})

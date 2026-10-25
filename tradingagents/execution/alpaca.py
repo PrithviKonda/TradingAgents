@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
+from decimal import ROUND_DOWN, Decimal
 from zoneinfo import ZoneInfo
 
 import requests
@@ -34,6 +35,15 @@ LIVE_UNLOCK_ENV = "TRADINGAGENTS_LIVE_TRADING"
 
 def live_trading_unlocked() -> bool:
     return os.getenv(LIVE_UNLOCK_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def format_quantity(quantity: float) -> str:
+    """``quantity`` in fixed notation to Alpaca's 9 decimals, rounded down.
+
+    Rounding down means a full exit never asks to sell more than is held.
+    """
+    exact = Decimal(repr(quantity)).quantize(Decimal("1e-9"), rounding=ROUND_DOWN)
+    return f"{exact.normalize():f}"
 
 
 def client_order_id(order: Order) -> str:
@@ -125,7 +135,7 @@ class AlpacaBroker:
             )
         placed = self._request("POST", "/v2/orders", json={
             "symbol": order.ticker.upper(),
-            "qty": f"{order.quantity:g}",
+            "qty": format_quantity(order.quantity),
             "side": order.side,
             "type": "market",
             "time_in_force": "day",
