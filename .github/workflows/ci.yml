@@ -19,7 +19,7 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
         # One run away from UTC, so a test that only passes in UTC fails here.
         include:
-          - python-version: "3.12"
+          - python-version: "3.13"
             tz: America/New_York
     env:
       TZ: ${{ matrix.tz }}
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Fresh install (no dev extras) and import
         run: |
           python -m pip install --upgrade pip
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Install ruff
         run: pip install "ruff>=0.16"
       - name: Lint the repository

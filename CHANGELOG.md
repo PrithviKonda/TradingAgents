@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased]
+
+### Added
+
+- **Portfolio simulation.** `tradingagents simulate` (and `backtest --simulate`) trades a backtest's decisions through a simulated account, with slippage and commission, and reports the equity curve, return, Sharpe ratio, maximum drawdown and the benchmark's buy-and-hold. `tradingagents.execution.simulate` does the same from Python.
+- **Paper trading.** `tradingagents paper` analyzes tickers, sizes each rating against a local paper account and fills it at the latest close. The account keeps its cash, positions and fills between sessions, and the agents see its holdings.
+- **Broker trading.** `tradingagents trade` sends the same plan to Alpaca, its paper account by default. A live account needs `--live` and `TRADINGAGENTS_LIVE_TRADING=1`; orders over `execution.max_order_notional` are refused, and a session re-run on the same day cannot double an order.
+- The `execution` config block sets the per-position cap, the target weight of each rating, slippage, commission, fractional shares and short selling.
+
+### Changed
+
+- CI's install, lint and time-zone jobs run on Python 3.13, and the repository pins 3.13 in `.python-version`.
+
 ## [0.7.0] — 2026-10-16
 
 Runs on your ChatGPT plan, backtests scored from the first close after each decision, a note at start-up when a newer release is out, and a wheel attached to each GitHub release.

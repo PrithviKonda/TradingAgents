@@ -202,6 +202,23 @@ def build_default_config() -> dict:
             ".SA":  "^BVSP",       # B3 Brazil (Ibovespa)
             "":     "SPY",         # default for US-listed tickers (no suffix)
         },
+        # Turning ratings into orders, for the simulator, paper accounts and
+        # brokers (tradingagents.execution). Each rating targets a fraction of
+        # max_position_pct of equity (Buy 1.0, Overweight 0.75, Underweight
+        # 0.25, Sell 0); Hold keeps the position and REVIEW never trades.
+        "execution": {
+            "starting_cash": 100_000.0,
+            "max_position_pct": 0.10,
+            "target_weights": None,        # e.g. {"Overweight": 0.5} to override a tier
+            "min_trade_pct": 0.005,        # skip rebalances smaller than this share of equity
+            "allow_fractional": False,
+            "allow_short": False,
+            "slippage_bps": 5.0,
+            "commission_per_order": 0.0,
+            "commission_pct": 0.0,
+            # Real brokers refuse any single order above this notional; None disables.
+            "max_order_notional": 10_000.0,
+        },
 
     })
 

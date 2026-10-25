@@ -381,6 +381,43 @@ tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7
 
 Each cell is scored on realized alpha against the instrument's regional benchmark, grouped by rating. A decision is entered at the first close after its date, because a run reads news published after that day's close. Your own memory log is never written to, and re-running the same grid with `run_id=result.run_id` skips the cells that already ran, so an interrupted sweep continues where it stopped.
 
+## Simulating, paper trading and brokers
+
+`tradingagents.execution` turns ratings into orders. Each rating targets a share of a per-position cap (`execution.max_position_pct` of equity): Buy the whole cap, Overweight 75%, Underweight 25%, Sell nothing. Hold keeps the position as it is, and a decision with no readable rating never trades. The simulator, the paper account and a real broker all trade this one rule, and the `execution` block in the config sets the cap, the tier weights, slippage, commission, fractional shares and the largest order a broker may receive.
+
+**Simulate a backtest.** Replay a sweep's decisions through an account to get an equity curve, return, Sharpe ratio, maximum drawdown and the benchmark's buy-and-hold over the same sessions. The sweep's LLM cost is paid once; replay it under any sizing for free.
+
+```bash
+tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7 --simulate
+tradingagents simulate --run-id 20260801_120000 --cash 50000 --max-position 0.2 --out ./sim
+```
+
+```python
+from tradingagents.execution import decisions_from_log, simulate
+
+# result is the run_backtest result from above
+sim = simulate(decisions_from_log(result.log_path), config, starting_cash=100_000)
+print(sim.render())
+sim.write("sim")   # equity.csv, fills.csv, metrics.json
+```
+
+**Paper trade.** Analyze tickers, size the ratings against a local paper account, and fill them at the latest close. The account is saved under `results_dir/paper/` and carries its cash, positions and fills from one session to the next; the agents see its holdings as their portfolio context.
+
+```bash
+tradingagents paper NVDA,AAPL                 # a new account starts with execution.starting_cash
+tradingagents paper NVDA --account swing --dry-run
+tradingagents paper --status --account swing
+```
+
+**Trade at a broker.** `tradingagents trade` sends the same plan to [Alpaca](https://alpaca.markets), its paper account by default. Set `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; the session shows the planned orders and asks before sending them (`--yes` skips the question, `--dry-run` sends nothing).
+
+```bash
+tradingagents trade NVDA,AAPL                 # Alpaca paper
+TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade NVDA --live   # real money
+```
+
+Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither a habitual flag nor a copied config can place a real order on its own. Orders over `execution.max_order_notional` (10,000 by default) are refused before they are sent, and each order's client id is built from the date, ticker and side, so re-running a session the same day cannot double an order. Orders are market orders sized at the latest close; the fill comes at the market's price.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

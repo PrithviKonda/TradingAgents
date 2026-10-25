@@ -1,5 +1,6 @@
 import sys
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -10,7 +11,17 @@ from cli.models import AnalystType, AssetType
 from cli.prompts import filter_analysts_for_asset_type, parse_analysts
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
+from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.execution import (
+    BrokerError,
+    CostModel,
+    PaperBroker,
+    decisions_from_log,
+    run_session,
+    simulate as simulate_decisions,
+)
+from tradingagents.execution.alpaca import LIVE_UNLOCK_ENV, AlpacaBroker
 from tradingagents.llm_clients.openai_client import SIGNED_IN_PROVIDERS
 from tradingagents.portfolio import load_portfolio
 
@@ -120,6 +131,9 @@ def backtest(
     run_id: str = typer.Option(
         None, "--run-id", help="Continue an earlier sweep: its cells are skipped and its log reused"
     ),
+    simulate_book: bool = typer.Option(
+        False, "--simulate", help="Also trade the sweep's decisions through a simulated account"
+    ),
 ):
     """Score past decisions over a grid of tickers and dates."""
 
@@ -158,6 +172,161 @@ def backtest(
         console.print(f"[yellow]failed:[/yellow] {ticker} {date}: {reason}")
     for ticker, reason in result.settlement_failures:
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
+    if simulate_book and result.log_path.is_file():
+        console.print("")
+        _print_simulation(result.log_path, cash=None, max_position=None, end=None,
+                          benchmark="SPY", out=result.log_path.parent / "simulation")
+
+
+def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out) -> None:
+    config = _with_execution(DEFAULT_CONFIG, max_position_pct=max_position)
+    try:
+        decisions = decisions_from_log(log_path)
+        result = simulate_decisions(decisions, config, starting_cash=cash, end_date=end,
+                                    benchmark=benchmark or None)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(escape(result.render()))
+    if out:
+        console.print(f"Equity curve, fills and metrics: {result.write(out)}")
+
+
+def _with_execution(config: dict, **overrides) -> dict:
+    """``config`` with the given execution settings replaced, the rest kept."""
+    execution = {**config.get("execution", {}), **{k: v for k, v in overrides.items() if v is not None}}
+    return {**config, "execution": execution}
+
+
+@app.command()
+def simulate(
+    run_id: str = typer.Option(None, "--run-id", help="Replay the decisions of this backtest sweep"),
+    log: str = typer.Option(None, "--log", help="Or replay the decisions in this memory log file"),
+    cash: float = typer.Option(None, "--cash", help="Starting cash (default: execution.starting_cash)"),
+    max_position: float = typer.Option(None, "--max-position", help="Largest position as a share of equity, e.g. 0.1"),
+    end: str = typer.Option(None, "--end", help="Mark the account to this date, YYYY-MM-DD (default: today)"),
+    benchmark: str = typer.Option("SPY", "--benchmark", help="Buy-and-hold comparison; empty to skip"),
+    out: str = typer.Option(None, "--out", help="Directory for equity.csv, fills.csv and metrics.json"),
+):
+    """Trade past decisions through a simulated account: equity curve, drawdown, Sharpe."""
+    if bool(run_id) == bool(log):
+        console.print("[red]Pass exactly one of --run-id or --log[/red]")
+        raise typer.Exit(code=1)
+    if run_id:
+        path = Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / safe_ticker_component(run_id) / "trading_memory.md"
+    else:
+        path = Path(log)
+    _print_simulation(path, cash, max_position, end, benchmark, out)
+
+
+def _session_analysts(analysts: str | None, asset_type: str):
+    kind = AssetType(asset_type.strip().lower())
+    chosen = (parse_analysts(analysts, kind) if analysts
+              else filter_analysts_for_asset_type(list(AnalystType), kind))
+    return kind, [a.value for a in chosen]
+
+
+def _run_and_report(names, broker, kind, chosen, date, dry_run, confirm=None):
+    def show_progress(done, total, ticker):
+        console.print(f"[dim][{done}/{total}] analyzing {ticker}[/dim]")
+
+    try:
+        steps = run_session(names, broker, DEFAULT_CONFIG, trade_date=date, asset_type=kind.value,
+                            selected_analysts=chosen, confirm=confirm, submit=not dry_run,
+                            progress=show_progress)
+    except (BrokerError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print("")
+    for step in steps:
+        console.print(escape(step.describe()))
+    if dry_run:
+        console.print("[dim]Dry run: nothing was sent.[/dim]")
+    return steps
+
+
+@app.command()
+def paper(
+    tickers: str = typer.Argument(None, help="Comma-separated tickers to analyze and trade"),
+    account: str = typer.Option("default", "--account", help="Name of the paper account"),
+    cash: float = typer.Option(None, "--cash", help="Funding for a new account (default: execution.starting_cash)"),
+    date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD (default: today)"),
+    analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
+    asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but record no fills"),
+    status: bool = typer.Option(False, "--status", help="Show the account and exit"),
+):
+    """Paper trade: analyze, size the ratings, and fill them in a local paper account."""
+    path = Path(DEFAULT_CONFIG["results_dir"]) / "paper" / f"{safe_ticker_component(account)}.json"
+    execution = DEFAULT_CONFIG.get("execution", {})
+    try:
+        broker = PaperBroker.open(
+            path, starting_cash=cash if cash is not None else float(execution.get("starting_cash", 100_000)),
+            costs=CostModel.from_config(DEFAULT_CONFIG),
+            allow_short=bool(execution.get("allow_short", False)),
+            allow_fractional=bool(execution.get("allow_fractional", False)),
+        )
+    except BrokerError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if not status:
+        names = [t.strip() for t in (tickers or "").split(",") if t.strip()]
+        if not names:
+            console.print("[red]No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL[/red]")
+            raise typer.Exit(code=1)
+        try:
+            kind, chosen = _session_analysts(analysts, asset_type)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        _run_and_report(names, broker, kind, chosen, date, dry_run)
+        console.print("")
+
+    book = broker.portfolio()
+    console.print(f"Paper account '{account}' ({path})")
+    console.print(f"Cash: {book.cash:,.2f} {book.currency} · funded with {broker.starting_cash:,.2f}")
+    for held in book.positions:
+        console.print(f"- {held.ticker}: {held.quantity:g} @ {held.average_price:,.2f} average")
+    console.print(f"Fills recorded: {len(broker.fills)}")
+
+
+@app.command()
+def trade(
+    tickers: str = typer.Argument(..., help="Comma-separated tickers to analyze and trade"),
+    broker_name: str = typer.Option("alpaca", "--broker", help="Brokerage to trade at: alpaca"),
+    live: bool = typer.Option(
+        False, "--live", help=f"Trade the live account (real money); also needs {LIVE_UNLOCK_ENV}=1"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Send the planned orders without asking"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but send nothing"),
+    analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
+    asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
+):
+    """Trade at a brokerage: its paper account by default, the live one with --live."""
+    if broker_name.strip().lower() != "alpaca":
+        console.print(f"[red]Unknown broker {broker_name!r}; supported: alpaca[/red]")
+        raise typer.Exit(code=1)
+    names = [t.strip() for t in tickers.split(",") if t.strip()]
+    try:
+        kind, chosen = _session_analysts(analysts, asset_type)
+        broker = AlpacaBroker(paper=not live,
+                              max_order_notional=DEFAULT_CONFIG.get("execution", {}).get("max_order_notional"))
+    except (BrokerError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if live:
+        console.print("[bold red]LIVE account: orders placed here spend real money.[/bold red]")
+
+    def confirm(steps) -> bool:
+        console.print("\nPlanned orders:")
+        for step in steps:
+            console.print(f"  {escape(step.describe())}")
+        if yes:
+            return True
+        return typer.confirm(f"Send these orders to {broker.name}?", default=False)
+
+    _run_and_report(names, broker, kind, chosen, None, dry_run, confirm=confirm)
 
 
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
