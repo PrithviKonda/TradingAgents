@@ -20,16 +20,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dashboard import analytics as A, models as M, sources as S
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.execution import Decision, simulate
+from tradingagents.execution import decisions_from_log, simulate
 from tradingagents.memory.settlement import resolve_benchmark
 
 RATING_COLORS = {"Buy": "#0b8a5f", "Overweight": "#5cc49a", "Hold": "#8a939b",
-                 "Underweight": "#e8964a", "Sell": "#c8423a", "REVIEW": "#6c5ce7"}
+                 "Underweight": "#e8964a", "Sell": "#c8423a", RATING_REVIEW: "#6c5ce7"}
 RATING_SYMBOLS = {"Buy": "triangle-up", "Overweight": "triangle-up", "Hold": "circle",
-                  "Underweight": "triangle-down", "Sell": "triangle-down", "REVIEW": "x"}
+                  "Underweight": "triangle-down", "Sell": "triangle-down", RATING_REVIEW: "x"}
 TODAY = get_current_date()
 
 
@@ -98,9 +99,7 @@ def load_decisions(path: str, stamp: float) -> pd.DataFrame:
 @st.cache_data(show_spinner="Simulating the decisions…")
 def simulate_log(path: str, stamp: float, today: str, cash: float, max_position: float, slippage: float,
                  commission: float, benchmark: str) -> S.Account:
-    frame = S.load_decisions(path)
-    decisions = [Decision(d.date.strftime("%Y-%m-%d"), d.ticker, d.rating) for d in frame.itertuples()
-                 if d.rating != "REVIEW"]
+    decisions = decisions_from_log(path)    # the rated decisions, as `tradingagents simulate` reads them
     config = {**DEFAULT_CONFIG, "execution": {**DEFAULT_CONFIG.get("execution", {}),
                                               "max_position_pct": max_position, "slippage_bps": slippage,
                                               "commission_pct": commission}}
@@ -387,7 +386,7 @@ def signals_page(decisions: pd.DataFrame, account: S.Account | None, benchmark: 
 
 
 def quality_page(decisions: pd.DataFrame, benchmark: str):
-    scored = decisions[decisions["rating"] != "REVIEW"]
+    scored = decisions[decisions["rating"] != RATING_REVIEW]
     if scored.empty:
         st.info("Pick a decision log with rated decisions in the sidebar.")
         return
