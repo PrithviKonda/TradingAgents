@@ -43,6 +43,7 @@ import pandas as pd
 
 from tradingagents.dataflows.files import locked
 from tradingagents.dataflows.symbols import normalize_symbol
+from tradingagents.dataflows.vendors.yahoo.market import by_day
 from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
 
@@ -269,7 +270,7 @@ class PaperBroker:
         for p in sorted(self.pending, key=lambda p: (p["date"], p["side"] != "sell")):
             start = (datetime.strptime(p["date"], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
             try:
-                series = _daily(closes(p["ticker"], start, end)) if start < end else pd.Series(dtype=float)
+                series = by_day(closes(p["ticker"], start, end)) if start < end else pd.Series(dtype=float)
             except Exception as exc:  # an outage leaves the order for the next run
                 logger.warning("No close to settle %s %s: %s", p["side"], p["ticker"], exc)
                 series = pd.Series(dtype=float)
@@ -342,17 +343,6 @@ class PaperBroker:
         elif held.quantity * new_quantity < 0:
             held.average_price = price      # crossed through zero into the other side
         held.quantity = new_quantity
-
-
-def _daily(closes: pd.Series) -> pd.Series:
-    """Closes keyed by calendar day, missing and non-positive closes dropped."""
-    closes = closes.dropna()
-    closes = closes[closes > 0]
-    index = pd.DatetimeIndex(closes.index)
-    if index.tz is not None:
-        index = index.tz_localize(None)
-    closes.index = index.normalize()
-    return closes.sort_index()
 
 
 def _last_closed_session(now: datetime | None = None) -> str:

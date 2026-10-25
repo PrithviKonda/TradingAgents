@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from tradingagents.dataflows.symbols import normalize_symbol
-from tradingagents.dataflows.vendors.yahoo.market import get_closes
+from tradingagents.dataflows.vendors.yahoo.market import by_day, get_closes
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +33,6 @@ def resolve_benchmark(ticker: str, config: dict) -> str:
         if suffix and ticker_upper.endswith(suffix.upper()):
             return benchmark
     return benchmark_map.get("", "SPY")
-
-
-def _by_day(closes):
-    """Closes keyed by the calendar day of their bar, missing closes dropped.
-
-    Yahoo stamps a daily bar at midnight in its market's time zone (UTC for a
-    coin, New York for SPY), so two series meet on their dates, not their
-    instants. A missing or non-positive close is no price at all, not a bar to
-    score on.
-    """
-    closes = closes[closes > 0]
-    if getattr(closes.index, "tz", None) is not None:
-        closes = closes.tz_localize(None)
-    return closes
 
 
 def benchmark_return(bench, entry, exit_) -> float | None:
@@ -89,11 +75,11 @@ def fetch_returns(
 
     # Closes for the instrument the analysis priced (XAUUSD -> GC=F, #984),
     # from the first session after the decision date.
-    stock = _by_day(get_closes(ticker, trade_date, end_str))
+    stock = by_day(get_closes(ticker, trade_date, end_str))
     stock = stock[stock.index > start]
     # From a week earlier, so the benchmark has a close on or before entry.
     bench_start = (start - timedelta(days=7)).strftime("%Y-%m-%d")
-    bench = _by_day(get_closes(benchmark, bench_start, end_str))
+    bench = by_day(get_closes(benchmark, bench_start, end_str))
 
     # Require the full holding window to have traded. A rerun before it has
     # leaves the entry pending to retry next run, rather than settling on a

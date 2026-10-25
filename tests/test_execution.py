@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 import cli.main as m
+from tradingagents.dataflows.vendors.yahoo.market import by_day
 from tradingagents.execution import (
     BrokerError,
     CostModel,
@@ -230,6 +231,16 @@ def _closes(table: dict[str, dict[str, float]]):
             return series
         return series[(series.index >= pd.Timestamp(start)) & (series.index < pd.Timestamp(end))]
     return closes
+
+
+@pytest.mark.unit
+def test_closes_are_keyed_by_their_bars_day_once_each():
+    stamps = pd.DatetimeIndex(["2026-01-06 00:00", "2026-01-05 00:00", "2026-01-07 00:00", "2026-01-07 00:00",
+                               "2026-01-08 00:00"]).tz_localize("America/New_York")
+    closes = by_day(pd.Series([11.0, 10.0, 0.0, 12.0, float("nan")], index=stamps))
+    # Oldest first, naive dates, no empty or zero close, a repeated day's later bar.
+    assert closes.to_dict() == {pd.Timestamp("2026-01-05"): 10.0, pd.Timestamp("2026-01-06"): 11.0,
+                                pd.Timestamp("2026-01-07"): 12.0}
 
 
 def _config(**execution):

@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from tradingagents.dataflows.date_window import get_current_date
-from tradingagents.dataflows.vendors.yahoo.market import get_closes
+from tradingagents.dataflows.vendors.yahoo.market import by_day, get_closes
 from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
 from tradingagents.execution.paper import PaperBroker
 from tradingagents.memory import TradingMemoryLog
@@ -198,13 +198,7 @@ def load_report(folder: str | Path) -> list[tuple[str, str]]:
 def daily_closes(ticker: str, start: str, end: str) -> pd.Series:
     """Daily closes from ``start`` through ``end`` inclusive, keyed by calendar day."""
     stop = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    closes = get_closes(ticker, start, stop).dropna()
-    closes = closes[closes > 0]
-    index = pd.DatetimeIndex(closes.index)
-    if index.tz is not None:
-        index = index.tz_localize(None)
-    closes.index = index.normalize()
-    return closes[~closes.index.duplicated(keep="last")].sort_index()
+    return by_day(get_closes(ticker, start, stop))
 
 
 def ohlcv(ticker: str, end: str | None = None) -> pd.DataFrame:

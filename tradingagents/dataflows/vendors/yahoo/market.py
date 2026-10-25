@@ -272,6 +272,23 @@ def get_closes(symbol: str, start_date: str, end_date: str) -> pd.Series:
     return history["Close"] if history is not None and "Close" in history else pd.Series(dtype=float)
 
 
+def by_day(closes: pd.Series) -> pd.Series:
+    """Closes keyed by the calendar day of their bar, oldest first.
+
+    Yahoo stamps a daily bar at midnight in its market's time zone (UTC for a
+    coin, New York for SPY), so two series meet on their dates, not their
+    instants. A missing or non-positive close is no price at all, and a day
+    reported twice keeps its later bar.
+    """
+    closes = closes.dropna()
+    closes = closes[closes > 0]
+    index = pd.DatetimeIndex(closes.index)
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    closes.index = index.normalize()
+    return closes[~closes.index.duplicated(keep="last")].sort_index()
+
+
 def get_splits(symbol: str) -> pd.Series:
     """Every stock split on record, as new-shares-per-old ratios keyed by ex-date."""
     canonical = normalize_symbol(symbol)

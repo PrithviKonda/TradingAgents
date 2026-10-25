@@ -26,7 +26,7 @@ import pandas as pd
 from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol
-from tradingagents.dataflows.vendors.yahoo.market import get_closes
+from tradingagents.dataflows.vendors.yahoo.market import by_day, get_closes
 from tradingagents.execution.broker import Fill
 from tradingagents.execution.metrics import curve_stats
 from tradingagents.execution.paper import CostModel, PaperBroker, _Holding
@@ -55,17 +55,6 @@ def decisions_from_log(path: str | Path) -> list[Decision]:
     found = [Decision(e["date"], e["ticker"], e["rating"]) for e in entries
              if e["rating"] != RATING_REVIEW]
     return sorted(found, key=lambda d: (d.date, d.ticker))
-
-
-def _daily(closes: pd.Series) -> pd.Series:
-    """Closes keyed by calendar day, missing and non-positive closes dropped."""
-    closes = closes.dropna()
-    closes = closes[closes > 0]
-    index = pd.DatetimeIndex(closes.index)
-    if index.tz is not None:
-        index = index.tz_localize(None)
-    closes.index = index.normalize()
-    return closes[~closes.index.duplicated(keep="last")].sort_index()
 
 
 @dataclass
@@ -166,7 +155,7 @@ def simulate(
     # closes are fetched from a little earlier.
     lookback = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
     tickers = sorted({d.ticker for d in decisions} | set(held))
-    prices = {t: _daily(closes(t, lookback if t in held else start, fetch_end)) for t in tickers}
+    prices = {t: by_day(closes(t, lookback if t in held else start, fetch_end)) for t in tickers}
 
     last: dict[str, float] = {}
     for ticker, position in held.items():
@@ -231,7 +220,7 @@ def simulate(
     if benchmark is ...:
         benchmark = default_benchmark(sorted({d.ticker for d in decisions}), config)
     if benchmark:
-        bench = _daily(closes(benchmark, start, fetch_end))
+        bench = by_day(closes(benchmark, start, fetch_end))
         bench = bench[bench.index > pd.Timestamp(start)].reindex(equity_curve.index).ffill().dropna()
         if not bench.empty:
             bench_curve = bench / bench.iloc[0] * broker.starting_cash
