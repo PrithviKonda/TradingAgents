@@ -216,8 +216,14 @@ def build_default_config() -> dict:
             "slippage_bps": 5.0,
             "commission_per_order": 0.0,
             "commission_pct": 0.0,
-            # Real brokers refuse any single order above this notional; None disables.
-            "max_order_notional": 10_000.0,
+            # The largest single order, as a share of equity, in every session,
+            # simulation and broker. A larger buy is cut to it, so a position is
+            # built over several sessions; a sell that only reduces a position
+            # is exempt, so it can always exit. None disables.
+            "max_order_pct": 0.02,
+            # An optional dollar ceiling on any one order sent to a real broker,
+            # applied on top of max_order_pct (the lower wins). None disables.
+            "max_order_notional": None,
         },
 
     })

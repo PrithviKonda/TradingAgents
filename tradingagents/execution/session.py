@@ -7,22 +7,32 @@ human can look at the whole plan before anything is sent:
 1. Analyze every ticker, each run seeing the broker's book as its portfolio
    context, so the agents know what is held.
 2. Plan an order per decision from one equity figure, priced at the latest close.
+   The plan already holds every limit an order is held to: a buy is cut to the
+   per-order cap (``max_order_pct`` of equity, or the broker's
+   ``max_order_notional``) and to the cash on hand plus what the session's sells free, so what the human approves is what gets sent. A sell
+   that only reduces a position is never capped, so a grown position can exit.
 3. Ask ``confirm(plan)`` once, then send sells before buys, so the cash a sell
-   frees can fund a buy in the same session.
+   frees can fund a buy in the same session. A sell that is refused frees
+   nothing, so the buys are cut again to the cash actually left. At a broker
+   that only accepts an order (Alpaca), the session waits a bounded time for
+   the sells to fill and counts only what filled; the paper ledger fills its
+   queued sells before its buys, so a sell it accepted counts in full.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Broker, Fill, Order
-from tradingagents.execution.sizing import SizingRules, plan_order
+from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +56,16 @@ class SessionStep:
     order: Order | None = None
     fill: Fill | None = None
     error: str | None = None
+    note: str | None = None     # why the order differs from what the rating asked for
 
     def describe(self) -> str:
         if self.error:
             return f"{self.ticker}: failed - {self.error}"
         head = f"{self.ticker}: {self.rating}"
+        note = f" ({self.note})" if self.note else ""
         if self.order is None:
-            return f"{head}, no trade"
-        plan = f"{head}, {self.order.side} {self.order.quantity:g} @ ~{self.price:,.2f}"
+            return f"{head}, no trade{note}"
+        plan = f"{head}, {self.order.side} {self.order.quantity:g} @ ~{self.price:,.2f}{note}"
         if self.fill is None:
             return plan
         if self.fill.status == "filled" and self.fill.price is not None:
@@ -81,7 +93,13 @@ def run_session(
     graph = graph or TradingAgentsGraph(list(selected_analysts), config=config)
     rules = SizingRules.from_config(config)
     book = broker.portfolio()
-    steps = [SessionStep(t) for t in dict.fromkeys(t.strip().upper() for t in tickers if t.strip())]
+    # Canonical symbols, so BTCUSD and BTC-USD are one instrument and one
+    # position, not two that each get bought.
+    steps = [SessionStep(t) for t in dict.fromkeys(normalize_symbol(t) for t in tickers if t.strip())]
+    holding: dict[str, float] = {}
+    for held in book.positions:
+        key = normalize_symbol(held.ticker)
+        holding[key] = holding.get(key, 0.0) + held.quantity
 
     for index, step in enumerate(steps, 1):
         if progress:
@@ -94,26 +112,94 @@ def run_session(
             step.error = str(exc)
 
     marks = {s.ticker: s.price for s in steps if s.price}
-    for held in book.positions:
-        if held.ticker.upper() not in marks:
+    for ticker in holding:
+        if ticker not in marks:
             # An unpriced holding is marked at cost by the paper broker.
             with contextlib.suppress(Exception):
-                marks[held.ticker.upper()] = price(held.ticker, date)
+                marks[ticker] = price(ticker, date)
     equity = broker.equity(marks)
+    cap = order_cap(rules, equity, getattr(broker, "max_order_notional", None))
+    # Orders still working at the venue (a buy queued overnight) already move
+    # the position; a re-run must count them or it orders the same trade again.
+    pending: dict[str, float] = {}
+    committed = 0.0
+    for order in broker.open_orders() if hasattr(broker, "open_orders") else []:
+        ticker = normalize_symbol(order.ticker)
+        pending[ticker] = pending.get(ticker, 0.0) + order.signed()
+        if order.side == "buy":
+            if ticker not in marks:
+                with contextlib.suppress(Exception):
+                    marks[ticker] = price(ticker, date)
+            committed += order.quantity * marks.get(ticker, 0.0)
     for step in steps:
         if step.error or step.price is None:
             continue
-        held = book.position_in(step.ticker)
-        step.order = plan_order(step.ticker, step.rating, equity, step.price,
-                                held.quantity if held else 0.0, rules)
+        current = holding.get(step.ticker, 0.0) + pending.get(step.ticker, 0.0)
+        step.order = plan_order(step.ticker, step.rating, equity, step.price, current, rules)
+        if step.order is not None:
+            step.order, step.note = within_cap(step.order, step.price, current, cap, rules)
+        if pending.get(step.ticker):
+            opened = f"{pending[step.ticker]:+g} already on order"
+            step.note = f"{opened}; {step.note}" if step.note else opened
 
-    planned = [s for s in steps if s.order is not None]
+    cash = book.cash - committed
+    sells = [s for s in steps if s.order is not None and s.order.side == "sell"]
+    buys = [s for s in steps if s.order is not None and s.order.side == "buy"]
+    _fund(buys, cash + sum(s.order.quantity * s.price for s in sells), rules)
+
+    planned = sells + [s for s in buys if s.order is not None]
     if not submit or not planned or (confirm is not None and not confirm(steps)):
         return steps
-    for step in sorted(planned, key=lambda s: s.order.side != "sell"):
-        try:
-            step.fill = broker.submit(step.order, step.price, date)
-        except Exception as exc:  # a refused order is reported, and the rest still go
-            logger.warning("Order for %s failed: %s", step.ticker, exc)
-            step.error = str(exc)
+    for step in sells:
+        _send(broker, step, date)
+    _fund(buys, cash + _freed(broker, sells, wait=any(s.order is not None for s in buys)), rules)
+    for step in buys:
+        if step.order is not None:
+            _send(broker, step, date)
     return steps
+
+
+def _send(broker: Broker, step: SessionStep, date: str) -> None:
+    try:
+        step.fill = broker.submit(step.order, step.price, date)
+    except Exception as exc:  # a refused order is reported, and the rest still go
+        logger.warning("Order for %s failed: %s", step.ticker, exc)
+        step.error = str(exc)
+
+
+def _freed(broker: Broker, sells: list[SessionStep], wait: bool) -> float:
+    """The cash the session's sells freed for its buys."""
+    sent = [s for s in sells if s.fill is not None and s.fill.status != "rejected"]
+    wait_for_fills = getattr(broker, "wait_for_fills", None)
+    if wait_for_fills is None:
+        return sum(s.fill.quantity * s.price for s in sent)
+    if wait and sent:
+        try:
+            for step, fill in zip(sent, wait_for_fills([s.fill for s in sent]), strict=True):
+                step.fill = fill
+        except Exception as exc:  # unknown fills free nothing; the buys are cut instead
+            logger.warning("Could not confirm the sells' fills: %s", exc)
+            return 0.0
+    # An accepted order has freed nothing yet; only what filled is cash.
+    return sum(s.fill.quantity * s.price for s in sent if s.fill.status in ("filled", "partially_filled"))
+
+
+def _units(amount: float, price: float, rules: SizingRules) -> float:
+    units = max(amount, 0.0) / price
+    return units if rules.allow_fractional else math.floor(units + 1e-9)
+
+
+def _fund(buys: list[SessionStep], cash: float, rules: SizingRules) -> None:
+    """Cut buys, in order, to ``cash``: a session never borrows what the plan did not show."""
+    for step in buys:
+        if step.order is None or step.error:
+            continue
+        cost = step.order.quantity * step.price
+        if cost <= cash + 1e-6:
+            cash -= cost
+            continue
+        units = _units(cash, step.price, rules)
+        reason = f"cut from {step.order.quantity:g} to the {max(cash, 0.0):,.2f} cash available"
+        step.note = f"{step.note}; {reason}" if step.note else reason
+        step.order = Order(step.ticker, "buy", units) if units > 0 else None
+        cash -= units * step.price

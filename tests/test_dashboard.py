@@ -6,8 +6,11 @@ suite neither downloads a model nor reaches a price vendor.
 
 from __future__ import annotations
 
+import importlib.util
 import math
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +58,30 @@ def test_sharpe_and_sortino_follow_their_definitions():
     downside = math.sqrt((r[r < 0] ** 2).sum() / len(r)) * math.sqrt(252)
     assert stats["sortino"] == pytest.approx(r.mean() * 252 / downside)
     assert stats["total_return"] == pytest.approx(0.03)
+
+
+@pytest.mark.unit
+def test_a_saved_simulation_shows_the_figures_the_simulator_reported(tmp_path):
+    from tradingagents.execution import Decision, simulate
+
+    days = pd.bdate_range("2026-01-05", periods=6)
+    table = {"AAPL": [100, 100, 110, 90, 105, 100], "SPY": [400, 400, 404, 396, 400, 408]}
+
+    def closes(ticker, start, end):
+        series = pd.Series(table[ticker], index=days, dtype=float)
+        return series[(series.index >= start) & (series.index < end)]
+
+    config = {"execution": {"max_position_pct": 0.5, "slippage_bps": 0, "min_trade_pct": 0,
+                            "commission_per_order": 25.0}}
+    result = simulate([Decision("2026-01-05", "AAPL", "Buy")], config, starting_cash=10_000,
+                      end_date="2026-01-12", benchmark="SPY", closes=closes)
+    account = S.load_simulation(result.write(tmp_path / "run"))
+    stats = A.performance(account.equity, account.benchmark, account.starting_cash)
+    for key in ("total_return", "cagr", "volatility", "sharpe", "max_drawdown", "benchmark_return"):
+        assert stats[key] == pytest.approx(result.metrics[key]), key
+    # The first session's commission is a loss from the cash the account started with.
+    assert stats["worst_session"] <= -25 / 10_000
+    assert stats["total_return"] == pytest.approx((5_000 - 25 + 50 * 100) / 10_000 - 1)
 
 
 @pytest.mark.unit
@@ -147,6 +174,30 @@ def test_forward_returns_enter_at_the_first_close_after_the_decision():
 
 
 @pytest.mark.unit
+def test_a_weekend_entry_is_scored_against_the_benchmark_as_settlement_scores_it(monkeypatch):
+    from tradingagents.memory import settlement
+
+    # A coin Buy dated Friday enters Saturday; SPY jumps 5% on the Monday after.
+    coin = pd.Series([100.0 + i for i in range(14)], index=pd.date_range("2026-01-02", periods=14, freq="D"))
+    weekdays = pd.bdate_range("2025-12-22", "2026-01-16")
+    spy = pd.Series([420.0 if day >= pd.Timestamp("2026-01-05") else 400.0 for day in weekdays], index=weekdays)
+
+    def closes(symbol, start, end):
+        series = {"BTC-USD": coin, "SPY": spy}[symbol]
+        return series[(series.index >= start) & (series.index < end)]
+
+    monkeypatch.setattr(settlement, "get_closes", closes)
+    _, alpha, _, _ = settlement.fetch_returns("BTC-USD", "2026-01-02", 5, "SPY")
+    fr = A.forward_returns(_decisions([("2026-01-02", "BTC-USD", "Buy")]), {"BTC-USD": coin}, spy,
+                           horizons=(1, 5))
+    row = fr.iloc[0]
+    assert row["excess_5"] == pytest.approx(alpha)
+    assert alpha == pytest.approx(106 / 101 - 1 - 0.05)
+    # Saturday to Sunday: SPY did not trade, so its leg is flat rather than missing.
+    assert row["excess_1"] == pytest.approx(102 / 101 - 1)
+
+
+@pytest.mark.unit
 def test_rating_statistics_ic_and_confusion():
     fr = pd.DataFrame({
         "date": pd.bdate_range("2026-01-05", periods=6), "ticker": ["X"] * 6,
@@ -188,6 +239,7 @@ def test_features_never_look_ahead():
 @pytest.mark.unit
 @pytest.mark.parametrize("kind", ["mlp", "logistic"])
 def test_walk_forward_probabilities_are_out_of_sample(kind):
+    pytest.importorskip("sklearn")
     bars = _bars(700)
     cut = bars.index[520]
     changed = bars.copy()
@@ -203,6 +255,7 @@ def test_walk_forward_probabilities_are_out_of_sample(kind):
 
 @pytest.mark.unit
 def test_walk_forward_reports_calibration_and_importance():
+    pytest.importorskip("sklearn")
     result = M.walk_forward(_bars(700), horizon=5, kind="logistic", min_train=252, step=63)
     assert result.calibration["count"].sum() == result.label.notna().sum()
     assert set(result.importance["feature"]) == set(M.technical_features(_bars(50)).columns)
@@ -212,7 +265,28 @@ def test_walk_forward_reports_calibration_and_importance():
 
 @pytest.mark.unit
 def test_walk_forward_refuses_too_little_history():
+    pytest.importorskip("sklearn")
     with pytest.raises(ValueError, match="need at least"):
+        M.walk_forward(_bars(260), horizon=5)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("volume", [0.0, 1e6, np.nan])
+def test_walk_forward_runs_on_a_series_without_volume(volume):
+    # Spot FX reports zero, constant or no volume; the rest of the features still carry.
+    bars = _bars(700).assign(Volume=volume)
+    assert M.technical_features(bars)["volume_z"].iloc[19:].eq(0).all()
+    result = M.walk_forward(bars, horizon=5, kind="logistic", min_train=252, step=63, importance=False)
+    assert result.probability.between(0, 1).all() and len(result.probability) > 0
+
+
+@pytest.mark.unit
+def test_walk_forward_names_a_feature_missing_from_long_history():
+    bars = _bars(700)
+    bars["Close"] = 100 * 1.001 ** np.arange(700)       # never falls, so RSI is undefined
+    with pytest.raises(ValueError, match=r"have 0 of 700 sessions; no value often enough for rsi_14$"):
+        M.walk_forward(bars, horizon=5)
+    with pytest.raises(ValueError, match=r"have 61 of 260 sessions$"):
         M.walk_forward(_bars(260), horizon=5)
 
 
@@ -259,6 +333,7 @@ class _FakeChronos:
 
 @pytest.mark.unit
 def test_chronos_forecast_shapes_and_probability():
+    pytest.importorskip("torch")
     closes = _series(np.linspace(100, 120, 300))
     forecast = M.chronos_forecast(closes, horizon=10, pipeline=_FakeChronos())
     assert len(forecast.bands) == 10 and {"q10", "q50", "q90", "mean"} <= set(forecast.bands)
@@ -269,6 +344,7 @@ def test_chronos_forecast_shapes_and_probability():
 
 @pytest.mark.unit
 def test_chronos_backtest_sees_only_history_up_to_each_origin():
+    pytest.importorskip("torch")
     closes = _series(np.linspace(100, 160, 300))
     fake = _FakeChronos()
     record = M.chronos_backtest(closes, horizon=5, origins=6, spacing=10, pipeline=fake)
@@ -312,6 +388,33 @@ def test_sources_find_every_artifact(tmp_path):
 
 
 @pytest.mark.unit
+def test_sources_expand_a_home_relative_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sources = S.Sources.from_config({"results_dir": "~/results", "memory_log_path": "~/memory/log.md"})
+    assert (sources.results_dir, sources.memory_log_path) == (tmp_path / "results", tmp_path / "memory" / "log.md")
+    assert S.Sources.from_config({"results_dir": "x"}, "~/other").results_dir == tmp_path / "other"
+
+
+@pytest.mark.unit
+def test_a_saved_simulation_with_no_fills_opens(tmp_path):
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.execution import Decision, simulate
+
+    def closes(ticker, start, end):
+        series = _series([100, 101, 102, 103])               # Jan 5 .. Jan 8
+        return series[(series.index >= start) & (series.index < end)]
+
+    result = simulate([Decision("2026-01-05", "AAPL", "Hold")], DEFAULT_CONFIG,
+                      end_date="2026-01-08", benchmark=None, closes=closes)
+    account = S.load_simulation(result.write(tmp_path / "hold"))
+    assert account.fills.empty and len(account.equity) == len(result.equity)
+
+    # A run saved before fills.csv had a header holds a bare newline.
+    (tmp_path / "hold" / "fills.csv").write_text("\n", encoding="utf-8")
+    assert S.load_simulation(tmp_path / "hold").fills.empty
+
+
+@pytest.mark.unit
 def test_a_paper_account_is_marked_to_market_from_its_fills(tmp_path):
     path = tmp_path / "paper.json"
     broker = PaperBroker.open(path, starting_cash=1_000, costs=CostModel(slippage_bps=0))
@@ -327,10 +430,30 @@ def test_a_paper_account_is_marked_to_market_from_its_fills(tmp_path):
     assert account.starting_cash == 1_000
 
 
+@pytest.mark.unit
+def test_a_paper_account_replays_across_a_split_in_the_split_adjusted_basis(tmp_path):
+    path = tmp_path / "paper.json"
+    broker = PaperBroker.open(path, starting_cash=10_000, costs=CostModel(slippage_bps=0))
+    broker.submit(Order("NVDA", "buy", 5), 1_000.0, "2026-01-05")
+    PaperBroker.open(path, starting_cash=0, splits=lambda t: pd.Series({pd.Timestamp("2026-01-07"): 10.0}))
+    # Split-adjusted closes: the pre-split 1,000 reads as 100.
+    prices = {"NVDA": _series([100, 100, 100, 100])}          # Jan 5 .. Jan 8
+
+    def closes(ticker, start, end):
+        series = prices[ticker]
+        return series[(series.index >= start) & (series.index <= end)]
+
+    account = S.load_paper(path, closes=closes, end_date="2026-01-08")
+    assert list(account.equity) == [10_000] * 4
+    assert account.fills.iloc[0][["quantity", "price"]].tolist() == [50, 100]
+
+
 # -- the app ---------------------------------------------------------------------------
 
 @pytest.mark.unit
 def test_the_app_renders_every_tab_from_saved_artifacts(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    pytest.importorskip("plotly")
     from streamlit.testing.v1 import AppTest
 
     sim = tmp_path / "simulation"
@@ -351,3 +474,171 @@ def test_the_app_renders_every_tab_from_saved_artifacts(tmp_path, monkeypatch):
     assert not at.exception
     assert any(m.label == "Sharpe" for m in at.metric)
     assert any(m.label == "Closed trades" and m.value == "1" for m in at.metric)
+
+
+def _app(tmp_path, monkeypatch):
+    """The app under AppTest, reading ``tmp_path`` with synthetic prices and no model downloads."""
+    pytest.importorskip("streamlit")
+    pytest.importorskip("plotly")
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    # st.cache_data is process-wide, so one test's prices never reach another's.
+    st.cache_data.clear()
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    def ohlcv(ticker, end=None):
+        frame = _bars(700)
+        frame.index = pd.bdate_range(end=end, periods=700)
+        return frame
+
+    def daily_closes(ticker, start, end):
+        close = ohlcv(ticker, end)["Close"]
+        return close[close.index >= start]
+
+    monkeypatch.setattr(S, "ohlcv", ohlcv)
+    monkeypatch.setattr(S, "daily_closes", daily_closes)
+    app = Path(M.__file__).with_name("app.py")
+    monkeypatch.setattr(sys, "argv", [str(app), "--results-dir", str(tmp_path)])
+    return AppTest.from_file(str(app), default_timeout=120)
+
+
+@pytest.mark.unit
+def test_the_app_rereads_a_decision_log_that_changed(tmp_path, monkeypatch):
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    memory = TradingMemoryLog({"memory_log_path": str(log)})
+    memory.store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert not at.exception
+    read = next(s for s in at.selectbox if s.label == "Read a decision")
+    assert len(read.options) == 1
+
+    memory.store_decision("MSFT", "2026-01-06", "Rating: Sell\n\ndown")
+    at.run()
+    read = next(s for s in at.selectbox if s.label == "Read a decision")
+    assert len(read.options) == 2
+
+
+@pytest.mark.unit
+def test_the_app_recomputes_a_model_when_the_date_moves(tmp_path, monkeypatch):
+    from tradingagents.dataflows import date_window
+
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-02")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    next(b for b in at.button if b.label == "Train and evaluate").click().run()
+    assert not at.exception
+    assert any(m.label.endswith("as of 2026-03-02") for m in at.metric)
+
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-09")
+    at.run()
+    assert any(m.label.endswith("as of 2026-03-09") for m in at.metric)
+
+
+@pytest.mark.unit
+def test_a_failed_overlay_warns_and_the_other_tabs_still_render(tmp_path, monkeypatch):
+    if not M.chronos_available():
+        pytest.skip("Chronos is not installed")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the network diverged")
+
+    monkeypatch.setattr(M, "walk_forward", broken)
+    at = _app(tmp_path, monkeypatch)      # offline, with no model on disk: Chronos cannot load
+    at.run()
+    next(t for t in at.text_input if t.label == "Ticker (or pick below)").input("AAPL").run()
+    next(c for c in at.checkbox if c.label == "MLP P(up)").check().run()
+    next(c for c in at.checkbox if c.label == "Chronos forecast").check().run()
+    assert not at.exception
+    warnings = " ".join(w.value for w in at.warning)
+    assert "MLP" in warnings and "Chronos" in warnings
+    assert any(s.value == "Analyst reports" for s in at.subheader)        # Research
+    assert any(b.label == "Train and evaluate" for b in at.button)        # Models
+
+
+@pytest.mark.unit
+def test_the_benchmark_defaults_to_the_configured_one(tmp_path, monkeypatch):
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("7203.T", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert at.sidebar.text_input[0].value == "SPY"
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert at.sidebar.text_input[0].value == "^N225"        # the log's own market
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "benchmark_ticker", "QQQ")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert at.sidebar.text_input[0].value == "QQQ"
+
+
+@pytest.mark.unit
+def test_a_tab_that_fails_shows_its_error_and_the_tabs_after_it_render(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("no signal")
+
+    monkeypatch.setattr(A, "forward_returns", broken)
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert [e.message for e in at.exception] == ["no signal", "no signal"]   # Signals, Signal quality
+    assert any(s.value == "Analyst reports" for s in at.subheader)
+    assert any(b.label == "Train and evaluate" for b in at.button)
+# -- the optional install --------------------------------------------------------------
+
+_DASHBOARD_STACK = ("streamlit", "plotly", "sklearn", "torch", "chronos")
+
+
+def _modules_loaded_by(code: str) -> set[str]:
+    """Run ``code`` in a fresh interpreter and return the dashboard-stack modules it loaded."""
+    probe = f"import sys\n{code}\nprint(' '.join(sorted({{m.split('.')[0] for m in sys.modules}})))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
+                         cwd=Path(__file__).resolve().parents[1]).stdout.split()
+    return set(out) & set(_DASHBOARD_STACK)
+
+
+@pytest.mark.unit
+def test_the_dashboard_stack_is_an_optional_extra():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    names = ("streamlit", "plotly", "scikit-learn", "chronos-forecasting")
+    core = " ".join(project["dependencies"])
+    assert not [n for n in names if n in core]
+    extra = " ".join(project["optional-dependencies"]["dashboard"])
+    assert all(n in extra for n in names)
+
+
+@pytest.mark.unit
+def test_the_cli_and_core_import_without_the_dashboard_stack():
+    assert _modules_loaded_by("import cli.main, tradingagents.execution, tradingagents.dashboard.models") == set()
+
+
+@pytest.mark.unit
+def test_chronos_available_does_not_import_torch(monkeypatch):
+    assert _modules_loaded_by("from tradingagents.dashboard import models\nmodels.chronos_available()") == set()
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "torch" else real(name, *a))
+    assert M.chronos_available() is False
+
+
+@pytest.mark.unit
+def test_the_dashboard_command_asks_for_the_extra_when_streamlit_is_missing(monkeypatch):
+    from typer.testing import CliRunner
+
+    from cli import main
+
+    launched = []
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "streamlit" else real(name, *a))
+    monkeypatch.setattr(subprocess, "call", lambda command, *a, **k: launched.append(command) or 0)
+    result = CliRunner().invoke(main.app, ["dashboard", "--no-browser"])
+    assert result.exit_code == 1
+    assert 'pip install "tradingagents[dashboard]"' in result.output
+    assert launched == []

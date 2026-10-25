@@ -97,7 +97,8 @@ tradingagents simulate --run-id 20260901_101500 --cash 25000 --max-position 0.25
 tradingagents simulate --log ~/.tradingagents/memory/trading_memory.md      # your live log
 ```
 
-The simulator starts a fresh paper account and walks forward one session at a time:
+The simulator starts a paper account (all cash, or holding a backtest's `--portfolio` book,
+valued at the last close before the first decision) and walks forward one session at a time:
 
 1. **Entry timing.** A decision dated D executes at the **first close after D**. A run
    dated D reads news published after D's close, so trading at D's own close would use
@@ -108,6 +109,11 @@ The simulator starts a fresh paper account and walks forward one session at a ti
    decision on that ticker changes it.
 4. **Collisions.** Two decisions landing on the same session (a weekend date and Monday's)
    collapse to the later one.
+5. **Caps.** Orders are held to the same per-position and per-order caps as a paper or
+   broker session (see [the per-order cap](#the-per-order-cap)).
+
+The benchmark defaults to the one settlement uses: `benchmark_ticker` if set, else the
+`benchmark_map` index all the tickers share, else `SPY`. `--benchmark` overrides it.
 
 It prints the return, CAGR, volatility, Sharpe, maximum drawdown, trade count,
 commissions, average exposure, and the benchmark's buy-and-hold over the same sessions.
@@ -138,9 +144,10 @@ slippage are optimistic for large or illiquid orders.
 ## 3. Paper account: trade forward without money
 
 ```bash
-tradingagents paper NVDA,AAPL                     # analyze, size, fill
-tradingagents paper NVDA,AAPL --dry-run           # show the plan, fill nothing
-tradingagents paper --status                      # cash, positions, fill count
+tradingagents paper NVDA,AAPL                     # analyze, size, queue for the next close
+tradingagents paper NVDA,AAPL --dry-run           # show the plan, queue nothing
+tradingagents paper --settle                      # fill pending orders whose close is in
+tradingagents paper --status                      # cash, positions, pending orders, fill count
 tradingagents paper MSFT --account swing --cash 25000   # a second, separate account
 ```
 
@@ -148,13 +155,22 @@ Each session does three things:
 
 1. **Analyze** every ticker. The agents see the paper account's cash and positions as
    their portfolio context, so they know what is already held.
-2. **Plan** an order per rating, sized at the latest close.
-3. **Fill** sells, then buys, at that close with slippage and commission.
+2. **Plan** an order per rating, sized at the latest close, held to the per-order cap
+   and to the cash on hand plus what the session's sells free.
+3. **Queue** the orders. Each fills, sells before buys, at the **first close after the
+   analysis date**, with slippage and commission: the same entry rule as the simulator,
+   so a paper fill never uses the close the analysis already read. A session dated in
+   the past fills at once; today's orders fill on the next run after the close, or with
+   `paper --settle`. A bar still in progress is never taken for a close.
 
 Each account is one JSON file, `results_dir/paper/<account>.json`, holding its cash,
-starting cash, positions with average prices, and every fill. Run the same command daily,
-for example from cron, and the account builds a real track record.
-`--cash` funds only a new account; to start over, delete the file.
+starting cash, positions with average prices, pending orders, split adjustments and every
+fill. Opening an account applies any stock split since a holding's last fill, so the
+ledger stays in the split-adjusted prices it is marked at. Tickers are canonical
+(`BTCUSD` and `BTC-USD` are one position), and the file is locked while it is written,
+so two sessions on one account both keep their fills. Run the same command daily, for
+example from cron, and the account builds a real track record. `--cash` funds only a new
+account; to start over, delete the file.
 
 ```bash
 # every weekday at 16:30, after the US close
@@ -201,14 +217,27 @@ TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade AAPL --live
 |---|---|
 | `--live` **and** `TRADINGAGENTS_LIVE_TRADING=1` | A habitual flag or a copied config placing a real order alone |
 | Confirmation prompt (unless `--yes`) | Sending a plan you haven't read |
-| `max_order_notional` (default $10,000) | Any single order above the cap, refused before it is sent |
-| Client order id `tradingagents-<date>-<ticker>-<side>` | A same-day re-run doubling an order; Alpaca rejects the duplicate id |
+| Per-order cap, applied while planning | An order larger than `max_order_pct` of equity (or `max_order_notional`); the plan you confirm already shows the cut |
+| Cash check, applied while planning and again after the sells | Buying on margin the plan didn't show; a refused or unfilled sell frees no cash |
+| Open orders counted while planning | A re-run (say, the morning after an order queued overnight) sending the same trade twice |
+| Unique client order id per attempt | Alpaca refusing a retry after a rejected order |
 | Blocked-account check | Trading an account Alpaca has restricted |
 
-Orders are **market, day** orders sized at the latest close. They fill at the market's
-price, which may differ, especially when sent outside market hours, where they queue for
-the next open. `--yes` sends without asking, for scheduled jobs; use it only once the
-plan is something you trust unattended.
+Orders are **market** orders (**day** for stocks, **gtc** for crypto) sized at the latest
+close, with quantities sent exactly, never rounded up. They fill at the market's price,
+which may differ, especially when sent outside market hours, where they queue for the
+next open. `--yes` sends without asking, for scheduled jobs; use it only once the plan is
+something you trust unattended.
+
+### The per-order cap
+
+No single order may exceed `max_order_pct` of equity (2% by default), or
+`max_order_notional` dollars when that is set; the lower wins. A larger buy is cut to the
+cap, so a position is built over several sessions: with a 10% position cap, a Buy fills in
+about five, whatever the account's size. A sell that only reduces a position is never
+capped, so you can always get out. Paper sessions and simulations apply the same cap, so
+their results show what a broker session would actually send. Set `max_order_pct` to the
+`max_position_pct` to fill a Buy in one order, keeping the cap only as a guard.
 
 ## Choosing between them
 
@@ -218,6 +247,6 @@ plan is something you trust unattended.
    coefficient, decay. See [dashboard guide](dashboard.md).
 4. **Paper trade** forward for weeks. Out-of-sample, forward-dated results are the only
    ones that can't have leaked.
-5. Move to **Alpaca paper**, then **live** with a small `max_order_notional`.
+5. Move to **Alpaca paper**, then **live**, with a small `max_order_notional` at first.
 
 TradingAgents is a research framework. Nothing it produces is financial advice.

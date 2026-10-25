@@ -167,11 +167,12 @@ The `execution` block drives the simulator, paper accounts and broker trading.
 | `target_weights` | `None` | Override how much of the cap each rating takes, e.g. `{"Overweight": 0.5, "Underweight": 0.0}`. Unlisted ratings keep their defaults. |
 | `min_trade_pct` | `0.005` | Skip a rebalance worth less than this share of equity, so a small drift doesn't trade. A full exit always goes through. |
 | `allow_fractional` | `False` | Trade fractional units. Off rounds every order down to whole shares. |
-| `allow_short` | `False` | Let a sell go below zero units. Off keeps paper and simulated accounts long-only. |
+| `allow_short` | `False` | Let a sell go below zero units, and allow negative `target_weights` (the only way a rating asks for a short). Off keeps every account long-only and refuses a negative weight. |
 | `slippage_bps` | `5.0` | Basis points a fill pays: buys fill this much above the reference price, sells this much below. 1 bp = 0.01%. |
 | `commission_per_order` | `0.0` | Fixed fee per fill, in account currency. |
 | `commission_pct` | `0.0` | Fee as a fraction of the fill's value: `0.001` = 10 bps. |
-| `max_order_notional` | `10000.0` | Real brokers refuse any single order worth more than this, before it is sent. `None` removes the cap; think twice. |
+| `max_order_pct` | `0.02` | The largest single order, as a share of equity, in every session, simulation and broker. A larger buy is cut to it while planning, so a position builds over several sessions; a sell that only reduces a position is exempt. `None` removes it. |
+| `max_order_notional` | `None` | An optional dollar ceiling on any one order, on top of `max_order_pct` (the lower wins). Worth setting when you first trade live. |
 
 Default share of the cap per rating, and what changes it:
 

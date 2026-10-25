@@ -20,15 +20,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dashboard import analytics as A, models as M, sources as S
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.execution import Decision, simulate
+from tradingagents.execution import decisions_from_log, simulate
+from tradingagents.memory.settlement import resolve_benchmark
 
 RATING_COLORS = {"Buy": "#0b8a5f", "Overweight": "#5cc49a", "Hold": "#8a939b",
-                 "Underweight": "#e8964a", "Sell": "#c8423a", "REVIEW": "#6c5ce7"}
+                 "Underweight": "#e8964a", "Sell": "#c8423a", RATING_REVIEW: "#6c5ce7"}
 RATING_SYMBOLS = {"Buy": "triangle-up", "Overweight": "triangle-up", "Hold": "circle",
-                  "Underweight": "triangle-down", "Sell": "triangle-down", "REVIEW": "x"}
+                  "Underweight": "triangle-down", "Sell": "triangle-down", RATING_REVIEW: "x"}
 TODAY = get_current_date()
 
 
@@ -44,6 +46,13 @@ def pct(value, digits: int = 2) -> str:
 
 def num(value, digits: int = 2) -> str:
     return "—" if value is None or (isinstance(value, float) and not np.isfinite(value)) else f"{value:,.{digits}f}"
+
+
+def default_benchmark(decisions: pd.DataFrame) -> str:
+    """The benchmark settlement would use: the configured ``benchmark_ticker``, else the
+    index of the market every ticker in the log trades on, else the default market's."""
+    found = {resolve_benchmark(t, DEFAULT_CONFIG) for t in decisions["ticker"].unique()}
+    return found.pop() if len(found) == 1 else resolve_benchmark("", DEFAULT_CONFIG)
 
 
 def _mtime(path: Path) -> float:
@@ -68,31 +77,33 @@ def _sim_closes(ticker: str, start: str, end_exclusive: str) -> pd.Series:
     return closes(ticker, start, end)
 
 
+# A cached read takes everything its answer depends on: ``stamp`` is the
+# artifact's modification time and ``today`` the end of its price window.
+# st.cache_data leaves parameters with a leading underscore out of the key.
+
 @st.cache_data(show_spinner=False)
-def load_simulation(path: str, _stamp: float) -> S.Account:
+def load_simulation(path: str, stamp: float) -> S.Account:
     return S.load_simulation(path)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_paper(path: str, _stamp: float) -> S.Account:
-    return S.load_paper(path, closes=closes, end_date=TODAY)
+def load_paper(path: str, stamp: float, today: str) -> S.Account:
+    return S.load_paper(path, closes=closes, end_date=today)
 
 
 @st.cache_data(show_spinner=False)
-def load_decisions(path: str, _stamp: float) -> pd.DataFrame:
+def load_decisions(path: str, stamp: float) -> pd.DataFrame:
     return S.load_decisions(path)
 
 
 @st.cache_data(show_spinner="Simulating the decisions…")
-def simulate_log(path: str, _stamp: float, cash: float, max_position: float, slippage: float,
+def simulate_log(path: str, stamp: float, today: str, cash: float, max_position: float, slippage: float,
                  commission: float, benchmark: str) -> S.Account:
-    frame = S.load_decisions(path)
-    decisions = [Decision(d.date.strftime("%Y-%m-%d"), d.ticker, d.rating) for d in frame.itertuples()
-                 if d.rating != "REVIEW"]
+    decisions = decisions_from_log(path)    # the rated decisions, as `tradingagents simulate` reads them
     config = {**DEFAULT_CONFIG, "execution": {**DEFAULT_CONFIG.get("execution", {}),
                                               "max_position_pct": max_position, "slippage_bps": slippage,
                                               "commission_pct": commission}}
-    result = simulate(decisions, config, starting_cash=cash, end_date=TODAY,
+    result = simulate(decisions, config, starting_cash=cash, end_date=today,
                       benchmark=benchmark or None, closes=_sim_closes)
     fills = pd.DataFrame([vars(f) for f in result.fills])
     if not fills.empty:
@@ -100,27 +111,28 @@ def simulate_log(path: str, _stamp: float, cash: float, max_position: float, sli
     return S.Account("simulation", result.equity, fills, result.benchmark, cash)
 
 
-@st.cache_data(show_spinner=False)
-def forward_table(decisions: pd.DataFrame, benchmark: str) -> pd.DataFrame:
+def forward_table(decisions: pd.DataFrame, benchmark: str, today: str) -> pd.DataFrame:
+    # Not cached itself: the closes are, and a failed fetch is retried on the
+    # next rerun rather than kept as an empty series.
     start = (decisions["date"].min() - timedelta(days=7)).strftime("%Y-%m-%d")
     series = {}
     for ticker in decisions["ticker"].unique():
         try:
-            series[ticker] = closes(ticker, start, TODAY)
+            series[ticker] = closes(ticker, start, today)
         except Exception:  # an unpriced ticker scores nothing rather than stopping the page
             series[ticker] = pd.Series(dtype=float)
     bench = None
     if benchmark:
         try:
-            bench = closes(benchmark, start, TODAY)
+            bench = closes(benchmark, start, today)
         except Exception:  # without the benchmark, raw forward returns still score
             bench = None
     return A.forward_returns(decisions, series, bench)
 
 
 @st.cache_data(show_spinner="Training the network walk-forward…")
-def walk_forward(ticker: str, horizon: int, kind: str, min_train: int, step: int) -> M.WalkForward:
-    return M.walk_forward(bars(ticker, TODAY), horizon=horizon, kind=kind, min_train=min_train, step=step)
+def walk_forward(ticker: str, horizon: int, kind: str, min_train: int, step: int, today: str) -> M.WalkForward:
+    return M.walk_forward(bars(ticker, today), horizon=horizon, kind=kind, min_train=min_train, step=step)
 
 
 @st.cache_resource(show_spinner="Loading Chronos-Bolt…")
@@ -129,13 +141,13 @@ def chronos_pipeline():
 
 
 @st.cache_data(show_spinner="Forecasting with Chronos…")
-def chronos_forecast(ticker: str, horizon: int, context: int) -> M.Forecast:
-    return M.chronos_forecast(bars(ticker, TODAY)["Close"], horizon, context, pipeline=chronos_pipeline())
+def chronos_forecast(ticker: str, horizon: int, context: int, today: str) -> M.Forecast:
+    return M.chronos_forecast(bars(ticker, today)["Close"], horizon, context, pipeline=chronos_pipeline())
 
 
 @st.cache_data(show_spinner="Backtesting Chronos over past origins…")
-def chronos_backtest(ticker: str, horizon: int, origins: int, spacing: int) -> pd.DataFrame:
-    return M.chronos_backtest(bars(ticker, TODAY)["Close"], horizon, origins, spacing,
+def chronos_backtest(ticker: str, horizon: int, origins: int, spacing: int, today: str) -> pd.DataFrame:
+    return M.chronos_backtest(bars(ticker, today)["Close"], horizon, origins, spacing,
                               pipeline=chronos_pipeline())
 
 
@@ -241,7 +253,7 @@ def portfolio_page(account: S.Account | None):
     if account is None or account.equity.empty:
         st.info("Pick an account in the sidebar: a saved simulation, a paper account, or simulate a decision log.")
         return
-    stats = A.performance(account.equity, account.benchmark)
+    stats = A.performance(account.equity, account.benchmark, account.starting_cash)
     tiles = [("Total return", pct(stats.get("total_return"))), ("CAGR", pct(stats.get("cagr"))),
              ("Sharpe", num(stats.get("sharpe"))), ("Sortino", num(stats.get("sortino"))),
              ("Max drawdown", pct(stats.get("max_drawdown"))), ("Calmar", num(stats.get("calmar"))),
@@ -355,13 +367,16 @@ def signals_page(decisions: pd.DataFrame, account: S.Account | None, benchmark: 
     shown = frame[frame.index >= frame.index[-1] - pd.DateOffset(months=months)]
     if want_mlp:
         try:
-            wf = walk_forward(ticker, 5, "mlp", 252, 21)
+            wf = walk_forward(ticker, 5, "mlp", 252, 21, TODAY)
             overlays["probability"] = wf.probability[wf.probability.index >= shown.index[0]]
-        except ValueError as exc:
-            st.warning(str(exc))
+        except Exception as exc:  # an overlay that fails is left off; the chart still draws
+            st.warning(f"No MLP overlay: {exc}")
     if want_chronos:
-        overlays["forecast"] = chronos_forecast(ticker, 20, 512)
-    fr = forward_table(decisions, benchmark) if not decisions.empty else None
+        try:
+            overlays["forecast"] = chronos_forecast(ticker, 20, 512, TODAY)
+        except Exception as exc:  # offline, or the model hub is down
+            st.warning(f"No Chronos overlay: {exc}")
+    fr =forward_table(decisions, benchmark, TODAY) if not decisions.empty else None
     st.plotly_chart(price_chart(ticker, shown, decisions, fills, fr, overlays), width="stretch")
     if fr is not None:
         own = fr[fr["ticker"] == ticker]
@@ -371,7 +386,7 @@ def signals_page(decisions: pd.DataFrame, account: S.Account | None, benchmark: 
 
 
 def quality_page(decisions: pd.DataFrame, benchmark: str):
-    scored = decisions[decisions["rating"] != "REVIEW"]
+    scored = decisions[decisions["rating"] != RATING_REVIEW]
     if scored.empty:
         st.info("Pick a decision log with rated decisions in the sidebar.")
         return
@@ -379,7 +394,7 @@ def quality_page(decisions: pd.DataFrame, benchmark: str):
     horizon = c1.selectbox("Horizon (sessions)", list(A.HORIZONS), index=1)
     excess = c2.toggle(f"Excess over {benchmark or 'benchmark'}", value=bool(benchmark), disabled=not benchmark)
     window = c3.slider("Rolling IC window (decisions)", 5, 60, 20)
-    fr = forward_table(scored, benchmark)
+    fr = forward_table(scored, benchmark, TODAY)
     target = f"excess_{horizon}" if excess else f"fwd_{horizon}"
     known = fr[fr[target].notna()]
     directional = known[known["direction"] != 0]
@@ -436,7 +451,7 @@ def quality_page(decisions: pd.DataFrame, benchmark: str):
             probabilities = {}
             for ticker in fr["ticker"].unique():
                 try:
-                    probabilities[ticker] = walk_forward(ticker, horizon, "mlp", 252, 21).probability
+                    probabilities[ticker] = walk_forward(ticker, horizon, "mlp", 252, 21, TODAY).probability
                 except Exception as exc:
                     st.warning(f"{ticker}: {exc}")
             detail, summary = M.agreement(fr, probabilities, horizon, excess)
@@ -507,7 +522,8 @@ def models_page(decisions: pd.DataFrame):
     run = st.session_state.get("mlp_run")
     if run and run[0] == ticker:
         try:
-            mlp, logit = walk_forward(*run[:2], "mlp", *run[2:]), walk_forward(*run[:2], "logistic", *run[2:])
+            mlp = walk_forward(*run[:2], "mlp", *run[2:], TODAY)
+            logit = walk_forward(*run[:2], "logistic", *run[2:], TODAY)
         except Exception as exc:
             st.error(str(exc))
         else:
@@ -548,7 +564,7 @@ def models_page(decisions: pd.DataFrame):
 
     st.subheader("Chronos-Bolt forecast")
     if not M.chronos_available():
-        st.warning("Chronos is not installed in this environment: pip install chronos-forecasting")
+        st.warning('Chronos is not installed in this environment: pip install "tradingagents[dashboard]"')
         return
     d1, d2, d3 = st.columns(3)
     fc_horizon = d1.slider("Forecast sessions ahead", 5, 64, 20)
@@ -559,8 +575,8 @@ def models_page(decisions: pd.DataFrame):
     run = st.session_state.get("chronos_run")
     if run and run[0] == ticker:
         try:
-            forecast = chronos_forecast(ticker, run[1], 512)
-            record = chronos_backtest(ticker, run[4], run[2], run[3])
+            forecast = chronos_forecast(ticker, run[1], 512, TODAY)
+            record = chronos_backtest(ticker, run[4], run[2], run[3], TODAY)
         except Exception as exc:
             st.error(str(exc))
             return
@@ -609,7 +625,7 @@ def main():
     if log_path:
         options.insert(1, "simulate the selected log")
     choice = st.sidebar.selectbox("Account", options, index=1 if len(options) > 1 else 0)
-    benchmark = st.sidebar.text_input("Benchmark", "SPY").strip().upper()
+    benchmark = st.sidebar.text_input("Benchmark", default_benchmark(decisions)).strip().upper()
 
     account = None
     try:
@@ -619,30 +635,27 @@ def main():
                 max_position = st.slider("Max position (% of equity)", 1, 100, 10) / 100
                 slippage = st.slider("Slippage (bps)", 0, 50, 5)
                 commission = st.slider("Commission (bps of notional)", 0, 50, 0) / 10_000
-            account = simulate_log(str(log_path), _mtime(log_path), cash, max_position, float(slippage),
+            account = simulate_log(str(log_path), _mtime(log_path), TODAY, cash, max_position, float(slippage),
                                    commission, benchmark)
         elif choice.startswith("simulation: "):
             path = sims[choice.removeprefix("simulation: ")]
             account = load_simulation(str(path), _mtime(path))
         elif choice.startswith("paper: "):
             path = papers[choice.removeprefix("paper: ")]
-            account = load_paper(str(path), _mtime(path))
+            account = load_paper(str(path), _mtime(path), TODAY)
     except Exception as exc:  # a broken artifact is reported, and the other tabs still work
         st.sidebar.error(f"Could not load the account: {exc}")
 
-    tabs = st.tabs(["Portfolio", "Trades", "Signals", "Signal quality", "Research", "Models"])
-    with tabs[0]:
-        portfolio_page(account)
-    with tabs[1]:
-        trades_page(account)
-    with tabs[2]:
-        signals_page(decisions, account, benchmark)
-    with tabs[3]:
-        quality_page(decisions, benchmark)
-    with tabs[4]:
-        research_page(decisions, sources)
-    with tabs[5]:
-        models_page(decisions)
+    pages = {"Portfolio": lambda: portfolio_page(account), "Trades": lambda: trades_page(account),
+             "Signals": lambda: signals_page(decisions, account, benchmark),
+             "Signal quality": lambda: quality_page(decisions, benchmark),
+             "Research": lambda: research_page(decisions, sources), "Models": lambda: models_page(decisions)}
+    for tab, render in zip(st.tabs(list(pages)), pages.values(), strict=True):
+        with tab:
+            try:
+                render()
+            except Exception as exc:  # a failing tab shows its error; the tabs after it still render
+                st.exception(exc)
 
 
 main()

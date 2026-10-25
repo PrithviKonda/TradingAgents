@@ -47,8 +47,10 @@ class Sources:
 
     @classmethod
     def from_config(cls, config: dict, results_dir: str | Path | None = None) -> Sources:
+        # Either may be written "~/...", as in a .env file or on the command line.
         log = config.get("memory_log_path")
-        return cls(Path(results_dir or config["results_dir"]), Path(log) if log else None)
+        return cls(Path(results_dir or config["results_dir"]).expanduser(),
+                   Path(log).expanduser() if log else None)
 
     def paper_accounts(self) -> dict[str, Path]:
         folder = self.results_dir / "paper"
@@ -96,19 +98,39 @@ def load_simulation(folder: str | Path) -> Account:
     folder = Path(folder)
     frame = pd.read_csv(folder / "equity.csv", index_col="date", parse_dates=["date"])
     metrics = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
-    fills_path = folder / "fills.csv"
-    rows = pd.read_csv(fills_path).to_dict("records") if fills_path.is_file() and fills_path.stat().st_size else []
+    rows = _read_fills(folder / "fills.csv")
     benchmark = frame["benchmark"].dropna() if "benchmark" in frame else None
     return Account(name=folder.name, equity=frame["equity"], fills=_fills_frame(rows),
                    benchmark=benchmark, starting_cash=metrics.get("starting_equity"))
 
 
+def _read_fills(path: Path) -> list[dict]:
+    """A saved fills.csv as rows; a run that never traded may have left one with no header."""
+    try:
+        return pd.read_csv(path).to_dict("records") if path.is_file() else []
+    except pd.errors.EmptyDataError:
+        return []
+
+
 def load_paper(path: str | Path, closes=None, end_date: str | None = None) -> Account:
     """A paper account, with an equity curve rebuilt by marking its fills to market daily."""
     broker = PaperBroker.open(path, starting_cash=0.0)
-    fills = _fills_frame([{k: getattr(f, k) for k in _FILL_COLUMNS} for f in broker.fills])
+    fills = _split_adjusted(_fills_frame([{k: getattr(f, k) for k in _FILL_COLUMNS} for f in broker.fills]),
+                            broker.adjustments)
     equity = replay_equity(fills, broker.starting_cash, closes or daily_closes, end_date)
     return Account(name=Path(path).stem, equity=equity, fills=fills, starting_cash=broker.starting_cash)
+
+
+def _split_adjusted(fills: pd.DataFrame, adjustments: list[dict]) -> pd.DataFrame:
+    """Fills before each recorded split restated in post-split units, as the closes are."""
+    if fills.empty or not adjustments:
+        return fills
+    fills = fills.copy()
+    for a in adjustments:
+        before = (fills["ticker"] == a["ticker"]) & (fills["date"] < pd.Timestamp(a["date"]))
+        fills.loc[before, "quantity"] *= a["ratio"]
+        fills.loc[before, "price"] /= a["ratio"]
+    return fills
 
 
 def replay_equity(fills: pd.DataFrame, starting_cash: float, closes, end_date: str | None = None) -> pd.Series:

@@ -49,6 +49,21 @@ def _by_day(closes):
     return closes
 
 
+def benchmark_return(bench, entry, exit_) -> float | None:
+    """The benchmark's return over a holding window from ``entry`` to ``exit_``.
+
+    The window is the instrument's own sessions; the benchmark is valued at its
+    last close by each end, so both returns span the same dates even when the
+    calendars differ (a coin trades at weekends, an index does not). ``bench``
+    is a series of positive closes in date order. None when it has no close by
+    the entry, or has not traded through the exit, where its close may yet move.
+    """
+    if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
+        return None
+    start, end = bench.asof(entry), bench.asof(exit_)
+    return float((end - start) / start)
+
+
 def fetch_returns(
     ticker: str, trade_date: str, holding_days: int = 5,
     benchmark: str = "SPY",
@@ -86,16 +101,11 @@ def fetch_returns(
     if len(stock) <= holding_days:
         return None, None, None, None
     entry, exit_ = stock.index[0], stock.index[holding_days]
-    # The window is the stock's own sessions; the benchmark is valued at its
-    # last close by each end, so both returns span the same dates even when
-    # the calendars differ (a coin trades at weekends, an index does not).
-    # It must have traded through the exit, or its close there may yet move.
-    if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
+    bench_ret = benchmark_return(bench, entry, exit_)
+    if bench_ret is None:
         return None, None, None, None
 
     raw = float((stock.iloc[holding_days] - stock.iloc[0]) / stock.iloc[0])
-    bench_entry, bench_exit = bench.asof(entry), bench.asof(exit_)
-    bench_ret = float((bench_exit - bench_entry) / bench_entry)
     alpha = raw - bench_ret
     # Every close used is known by the exit: the point-in-time cutoff for
     # injecting the lesson (#1251).

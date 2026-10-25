@@ -8,6 +8,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 COPY . .
+# The core install only: the dashboard extra (Streamlit and torch, over 1 GB)
+# stays out of the image.
 RUN pip install --no-cache-dir .
 
 FROM python:3.13-slim

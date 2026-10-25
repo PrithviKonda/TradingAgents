@@ -210,9 +210,11 @@ class TestCheckpointSignature(unittest.TestCase):
                            ("temperature", 0.2), ("openai_reasoning_effort", "high")):
             g.config = {**base_config, key: value}
             self.assertNotEqual(base, g._run_signature("stock"), key)
-        # Where a run keeps its files, and how it retries, do not change what it writes.
+        # Where a run keeps its files, how it retries, and how its rating is
+        # sized into orders afterwards do not change what it writes.
         for key, value in (("results_dir", "/elsewhere"), ("data_cache_dir", "/cache"),
-                           ("memory_log_path", "/log.md"), ("checkpoint_enabled", True), ("llm_max_retries", 9)):
+                           ("memory_log_path", "/log.md"), ("checkpoint_enabled", True), ("llm_max_retries", 9),
+                           ("execution", {"max_position_pct": 0.2, "max_order_notional": 5_000})):
             g.config = {**base_config, key: value}
             self.assertEqual(base, g._run_signature("stock"), key)
         g.config = dict(base_config)
