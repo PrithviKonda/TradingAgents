@@ -127,7 +127,8 @@ def run_session(
             step.error = str(exc)
 
     marks = {s.ticker: s.price for s in steps if s.price}
-    for ticker in holding:
+    # A venue that values its own book (Alpaca) needs no marks for the rest of it.
+    for ticker in holding if not getattr(broker, "marks_itself", False) else ():
         if ticker not in marks:
             # An unpriced holding is marked at cost by the paper broker.
             with contextlib.suppress(Exception):

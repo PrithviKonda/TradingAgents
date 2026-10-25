@@ -81,6 +81,8 @@ def client_order_id(order: Order) -> str:
 
 
 class AlpacaBroker:
+    marks_itself = True     # equity() is Alpaca's own figure; the caller's prices go unused
+
     def __init__(self, paper: bool = True, key_id: str | None = None, secret_key: str | None = None,
                  max_order_notional: float | None = None, max_order_pct: float | None = None,
                  timeout: float = 15.0, session: requests.Session | None = None,

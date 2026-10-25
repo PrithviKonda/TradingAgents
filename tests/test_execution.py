@@ -580,6 +580,17 @@ def _alpaca_session(broker, ratings, confirm=None):
 
 
 @pytest.mark.unit
+def test_an_alpaca_session_prices_only_what_it_trades(keys):
+    broker, _ = _alpaca(cash=50_000, equity=100_000, positions=[("AAPL", 100), ("MSFT", 100), ("TSLA", 100)])
+    priced = []
+    run_session(["NVDA"], broker, {"execution": {"max_position_pct": 0.10, "min_trade_pct": 0}},
+                trade_date="2026-01-05", price=lambda t, d: priced.append(t) or 50.0,
+                graph=_FakeGraph({"NVDA": "Buy"}), submit=False)
+    # Alpaca values the book itself, so the holdings it was not asked about are not fetched.
+    assert priced == ["NVDA"]
+
+
+@pytest.mark.unit
 def test_the_plan_shown_for_confirmation_is_already_cut_to_the_notional_cap(keys):
     # 10% of 100,500 at 50 is 201 units, 10,050: over the 10,000 cap.
     broker, session = _alpaca(cash=100_500, equity=100_500)
