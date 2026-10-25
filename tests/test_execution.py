@@ -548,6 +548,56 @@ def test_a_plan_never_buys_more_than_the_cash_on_hand(keys):
     assert steps[0].order == Order("MSFT", "buy", 20) and "cash available" in steps[0].note
 
 
+@pytest.mark.unit
+def test_a_paper_session_fills_at_the_close_after_its_analysis_not_the_one_it_read(tmp_path):
+    # The analysis of Jan 5 read Jan 5's close (100); it trades at Jan 6's (110).
+    prices = _closes({"MSFT": dict(zip(DAYS, [100, 110, 120, 130, 140], strict=True))})
+    broker = PaperBroker.open(tmp_path / "main.json", starting_cash=10_000, costs=FREE, fill_next_close=True)
+    steps, _ = _session(broker, {"MSFT": "Buy"})
+    assert steps[0].fill.status == "pending" and broker.fills == []
+
+    settled = broker.settle(prices, through="2026-01-09")
+    assert [(f.date, f.price, f.quantity) for f in settled] == [("2026-01-06", 110, 50)]   # sized at 100, filled at 110
+    assert broker.pending == [] and broker.quantity("MSFT") == 50
+
+
+@pytest.mark.unit
+def test_a_pending_order_waits_for_its_close_and_is_not_ordered_twice(tmp_path):
+    prices = _closes({"MSFT": {"2026-01-05": 100}})
+    broker = PaperBroker.open(tmp_path / "main.json", starting_cash=10_000, costs=FREE, fill_next_close=True)
+    _session(broker, {"MSFT": "Buy"})
+    assert broker.settle(prices, through="2026-01-05") == []          # no close after Jan 5 yet
+    again = PaperBroker.open(tmp_path / "main.json", starting_cash=0, costs=FREE, fill_next_close=True)
+    steps, _ = _session(again, {"MSFT": "Buy"})
+    assert steps[0].order is None and len(again.pending) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("clock, session", [("15:59", "2026-01-05"), ("16:45", "2026-01-06")])
+def test_an_in_progress_bar_is_never_taken_for_a_close(clock, session):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from tradingagents.execution.paper import _last_closed_session
+
+    now = datetime.fromisoformat(f"2026-01-06T{clock}").replace(tzinfo=ZoneInfo("America/New_York"))
+    assert _last_closed_session(now) == session
+
+
+@pytest.mark.unit
+def test_paper_settle_fills_what_is_pending(tmp_path, monkeypatch):
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(tmp_path))
+    path = tmp_path / "paper" / "demo.json"
+    queued = PaperBroker.open(path, starting_cash=10_000, costs=FREE, fill_next_close=True)
+    queued.submit(Order("MSFT", "buy", 10), 100.0, "2026-01-05")
+    monkeypatch.setattr(m, "get_closes", _closes({"MSFT": dict(zip(DAYS, [100, 110, 120, 130, 140], strict=True))}))
+    monkeypatch.setattr(m, "get_splits", lambda ticker: pd.Series(dtype=float))
+    result = CliRunner().invoke(m.app, ["paper", "--settle", "--account", "demo"])
+    assert result.exit_code == 0, result.output
+    assert "Filled pending buy 10 MSFT" in result.output and "2026-01-06 close" in result.output
+    assert "pending:" not in result.output
+
+
 # -- CLI ---------------------------------------------------------------------------
 
 @pytest.mark.unit

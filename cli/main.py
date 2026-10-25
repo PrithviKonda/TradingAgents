@@ -13,7 +13,7 @@ from cli.prompts import filter_analysts_for_asset_type, parse_analysts, parse_ti
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.dataflows.symbols import safe_ticker_component
-from tradingagents.dataflows.vendors.yahoo.market import get_splits
+from tradingagents.dataflows.vendors.yahoo.market import get_closes, get_splits
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.execution import (
     BrokerError,
@@ -269,8 +269,13 @@ def paper(
     asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but record no fills"),
     status: bool = typer.Option(False, "--status", help="Show the account and exit"),
+    settle: bool = typer.Option(False, "--settle", help="Fill pending orders whose next close is in, and exit"),
 ):
-    """Paper trade: analyze, size the ratings, and fill them in a local paper account."""
+    """Paper trade: analyze, size the ratings, and queue the orders for the next close.
+
+    An order fills at the first close after the analysis date, not the close the
+    analysis read, so a later run (or --settle) fills what is pending.
+    """
     path = Path(DEFAULT_CONFIG["results_dir"]) / "paper" / f"{safe_ticker_component(account)}.json"
     execution = DEFAULT_CONFIG.get("execution", {})
     try:
@@ -279,13 +284,15 @@ def paper(
             costs=CostModel.from_config(DEFAULT_CONFIG),
             allow_short=bool(execution.get("allow_short", False)),
             allow_fractional=bool(execution.get("allow_fractional", False)),
-            splits=get_splits,
+            splits=get_splits, fill_next_close=True,
         )
     except BrokerError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
     if not status:
+        _settle_paper(broker)
+    if not status and not settle:
         names = [t.strip() for t in (tickers or "").split(",") if t.strip()]
         if not names:
             console.print("[red]No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL[/red]")
@@ -296,6 +303,8 @@ def paper(
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
         _run_and_report(names, broker, kind, chosen, date, dry_run)
+        # A past --date already has its next close: fill at it now.
+        _settle_paper(broker)
         console.print("")
 
     book = broker.portfolio()
@@ -305,7 +314,24 @@ def paper(
         console.print(f"- {held.ticker}: {held.quantity:g} @ {held.average_price:,.2f} average")
     for split in broker.adjustments:
         console.print(f"- split: {split['ticker']} x{split['ratio']:g} on {split['date']}")
+    for order in broker.pending:
+        console.print(f"- pending: {order['side']} {order['quantity']:g} {order['ticker']} "
+                      f"(analysed {order['date']}), fills at the next close")
     console.print(f"Fills recorded: {len(broker.fills)}")
+
+
+def _settle_paper(broker: PaperBroker) -> None:
+    try:
+        settled = broker.settle(get_closes)
+    except BrokerError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    for fill in settled:
+        if fill.status == "filled":
+            console.print(f"Filled pending {fill.side} {fill.quantity:g} {fill.ticker} "
+                          f"@ {fill.price:,.2f} at the {fill.date} close")
+        else:
+            console.print(f"[yellow]Pending {fill.side} {fill.ticker} was {fill.status} at the {fill.date} close[/yellow]")
 
 
 @app.command()

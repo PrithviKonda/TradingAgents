@@ -9,6 +9,12 @@ reference price and a sell receives that much under it, and each fill pays a
 fixed plus a proportional commission. A buy the cash cannot cover is cut to what
 it can; the account is long-only unless ``allow_short`` is set.
 
+A paper trading session (``fill_next_close``) does not fill at the close its
+analysis already read: that would trade on news the close had priced in. Its
+orders wait as pending and fill at the first close after the analysis date,
+the rule the simulator and settlement use (#1518), when ``settle`` is called
+on a later run.
+
 Every price source here is split-adjusted, so the ledger has to be too: opened
 with a ``splits`` source, the account applies each split since a holding's last
 fill to its units and average price, and records the adjustment, so a 10:1
@@ -24,7 +30,9 @@ import os
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -33,6 +41,9 @@ from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
 
 logger = logging.getLogger(__name__)
+
+# closes(ticker, start, end) -> daily closes from start up to, not including, end.
+CloseSource = Callable[[str, str, str], pd.Series]
 
 # splits(ticker) -> new-shares-per-old ratios keyed by ex-date, e.g. 10.0 for 10:1.
 SplitSource = Callable[[str], pd.Series]
@@ -80,6 +91,10 @@ class PaperBroker:
     fills: list[Fill] = field(default_factory=list)
     # Splits applied to the holdings: {"ticker", "date", "ratio"}, oldest first.
     adjustments: list[dict] = field(default_factory=list)
+    # Queue orders for the next close instead of filling them at ``price``.
+    fill_next_close: bool = False
+    # Orders waiting for that close: {"ticker", "side", "quantity", "date"}.
+    pending: list[dict] = field(default_factory=list)
     name: str = "paper"
 
     def __post_init__(self):
@@ -120,7 +135,8 @@ class PaperBroker:
             "currency": self.currency,
             "positions": {t: asdict(h) for t, h in self.holdings.items()},
             "fills": [asdict(f) for f in self.fills],
-            "adjustments": self.adjustments,
+            "adjustments": [dict(a) for a in self.adjustments],
+            "pending": [dict(p) for p in self.pending],
         }
 
     def _write(self) -> None:
@@ -148,6 +164,7 @@ class PaperBroker:
                              for t, h in data.get("positions", {}).items()}
             self.fills = [Fill(**f) for f in data.get("fills", [])]
             self.adjustments = list(data.get("adjustments", []))
+            self.pending = list(data.get("pending", []))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise BrokerError(f"paper account {self.path} is not readable: {exc}") from exc
 
@@ -195,23 +212,67 @@ class PaperBroker:
             value += held.quantity * prices.get(ticker, held.average_price)
         return value
 
+    def open_orders(self) -> list[Order]:
+        return [Order(p["ticker"], p["side"], p["quantity"]) for p in self.pending]
+
     def submit(self, order: Order, price: float, date: str) -> Fill:
         if price <= 0 or not math.isfinite(price):
             raise BrokerError(f"no usable price for {order.ticker}: {price}")
+        if self.fill_next_close:
+            return self._transact(lambda: self._queue(order, date))
+        return self._transact(lambda: self._fill(order, price, date))
+
+    def settle(self, closes: CloseSource, through: str | None = None) -> list[Fill]:
+        """Fill each pending order at the first close after its date, up to ``through``.
+
+        ``through`` defaults to the last session that has closed, so an
+        in-progress bar is never taken for a close. An order with no such close
+        yet stays pending.
+        """
+        through = through or _last_closed_session()
+        return self._transact(lambda: self._settle(closes, through))
+
+    def _transact(self, change: Callable[[], object]):
+        """Run ``change`` on the account as it is on disk, and save it, under the lock."""
         if self.path is None:
-            return self._fill(order, price, date)
+            return change()
         # Another session may have traded this account since it was opened:
         # re-read it under the lock, so its fills are built on, not overwritten.
         with locked(self.path):
             self._reload()
             before = self._state()
-            fill = self._fill(order, price, date)
+            result = change()
             try:
                 self._write()
             except BaseException:
                 self._restore(before)      # not saved, so not applied
                 raise
-        return fill
+        return result
+
+    def _queue(self, order: Order, date: str) -> Fill:
+        ticker = order.ticker.upper()
+        self.pending.append({"ticker": ticker, "side": order.side, "quantity": order.quantity, "date": date})
+        return Fill(ticker, order.side, order.quantity, None, date=date, status="pending")
+
+    def _settle(self, closes: CloseSource, through: str) -> list[Fill]:
+        filled, waiting = [], []
+        end = (datetime.strptime(through, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Oldest first, and sells before buys, so a sell's cash can fund a buy.
+        for p in sorted(self.pending, key=lambda p: (p["date"], p["side"] != "sell")):
+            start = (datetime.strptime(p["date"], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            try:
+                series = _daily(closes(p["ticker"], start, end)) if start < end else pd.Series(dtype=float)
+            except Exception as exc:  # an outage leaves the order for the next run
+                logger.warning("No close to settle %s %s: %s", p["side"], p["ticker"], exc)
+                series = pd.Series(dtype=float)
+            if series.empty:
+                waiting.append(p)
+                continue
+            day = series.index[0].strftime("%Y-%m-%d")
+            fill = self._fill(Order(p["ticker"], p["side"], float(p["quantity"])), float(series.iloc[0]), day)
+            filled.append(fill)
+        self.pending = waiting
+        return filled
 
     def _fill(self, order: Order, price: float, date: str) -> Fill:
         ticker = order.ticker.upper()
@@ -246,6 +307,7 @@ class PaperBroker:
         self.holdings = {t: _Holding(**h) for t, h in state["positions"].items()}
         self.fills = [Fill(**f) for f in state["fills"]]
         self.adjustments = state["adjustments"]
+        self.pending = state["pending"]
 
     # -- internals -------------------------------------------------------------
 
@@ -272,3 +334,21 @@ class PaperBroker:
         elif held.quantity * new_quantity < 0:
             held.average_price = price      # crossed through zero into the other side
         held.quantity = new_quantity
+
+
+def _daily(closes: pd.Series) -> pd.Series:
+    """Closes keyed by calendar day, missing and non-positive closes dropped."""
+    closes = closes.dropna()
+    closes = closes[closes > 0]
+    index = pd.DatetimeIndex(closes.index)
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    closes.index = index.normalize()
+    return closes.sort_index()
+
+
+def _last_closed_session(now: datetime | None = None) -> str:
+    """Today once the US close has printed, else yesterday."""
+    now = now or datetime.now(ZoneInfo("America/New_York"))
+    day = now.date() if now.time() >= time(16, 30) else now.date() - timedelta(days=1)
+    return day.isoformat()
