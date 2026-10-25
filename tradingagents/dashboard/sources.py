@@ -96,11 +96,18 @@ def load_simulation(folder: str | Path) -> Account:
     folder = Path(folder)
     frame = pd.read_csv(folder / "equity.csv", index_col="date", parse_dates=["date"])
     metrics = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
-    fills_path = folder / "fills.csv"
-    rows = pd.read_csv(fills_path).to_dict("records") if fills_path.is_file() and fills_path.stat().st_size else []
+    rows = _read_fills(folder / "fills.csv")
     benchmark = frame["benchmark"].dropna() if "benchmark" in frame else None
     return Account(name=folder.name, equity=frame["equity"], fills=_fills_frame(rows),
                    benchmark=benchmark, starting_cash=metrics.get("starting_equity"))
+
+
+def _read_fills(path: Path) -> list[dict]:
+    """A saved fills.csv as rows; a run that never traded may have left one with no header."""
+    try:
+        return pd.read_csv(path).to_dict("records") if path.is_file() else []
+    except pd.errors.EmptyDataError:
+        return []
 
 
 def load_paper(path: str | Path, closes=None, end_date: str | None = None) -> Account:

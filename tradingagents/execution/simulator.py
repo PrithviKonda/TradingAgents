@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
@@ -107,7 +107,9 @@ class SimulationResult:
             frame["benchmark"] = self.benchmark
         frame.index.name = "date"
         frame.to_csv(directory / "equity.csv")
-        pd.DataFrame([asdict(f) for f in self.fills]).to_csv(directory / "fills.csv", index=False)
+        # The columns are named even with no fills, so a run that never traded reads back.
+        pd.DataFrame([asdict(f) for f in self.fills], columns=[f.name for f in fields(Fill)]).to_csv(
+            directory / "fills.csv", index=False)
         (directory / "metrics.json").write_text(json.dumps(self.metrics, indent=2), encoding="utf-8")
         return directory
 

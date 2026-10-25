@@ -312,6 +312,25 @@ def test_sources_find_every_artifact(tmp_path):
 
 
 @pytest.mark.unit
+def test_a_saved_simulation_with_no_fills_opens(tmp_path):
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.execution import Decision, simulate
+
+    def closes(ticker, start, end):
+        series = _series([100, 101, 102, 103])               # Jan 5 .. Jan 8
+        return series[(series.index >= start) & (series.index < end)]
+
+    result = simulate([Decision("2026-01-05", "AAPL", "Hold")], DEFAULT_CONFIG,
+                      end_date="2026-01-08", benchmark=None, closes=closes)
+    account = S.load_simulation(result.write(tmp_path / "hold"))
+    assert account.fills.empty and len(account.equity) == len(result.equity)
+
+    # A run saved before fills.csv had a header holds a bare newline.
+    (tmp_path / "hold" / "fills.csv").write_text("\n", encoding="utf-8")
+    assert S.load_simulation(tmp_path / "hold").fills.empty
+
+
+@pytest.mark.unit
 def test_a_paper_account_is_marked_to_market_from_its_fills(tmp_path):
     path = tmp_path / "paper.json"
     broker = PaperBroker.open(path, starting_cash=1_000, costs=CostModel(slippage_bps=0))
