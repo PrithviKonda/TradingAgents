@@ -1,3 +1,4 @@
+import re
 import sys
 from datetime import datetime
 from enum import StrEnum
@@ -233,9 +234,16 @@ def simulate(
         path = Path(log)
     if not out:
         # Saved under results_dir by default, where the dashboard looks for simulations.
-        name = f"{run_id or path.stem}_{datetime.now():%Y%m%d_%H%M%S}"
-        out = Path(DEFAULT_CONFIG["results_dir"]) / "simulations" / safe_ticker_component(name)
+        out = Path(DEFAULT_CONFIG["results_dir"]) / "simulations" / _simulation_name(run_id or path.stem)
     _print_simulation(path, cash, max_position, end, benchmark, out)
+
+
+def _simulation_name(label: str) -> str:
+    """A folder name for a simulation of ``label``: path-safe, timestamped, at most 32 characters."""
+    # Any run id or log name will do: what a path cannot hold becomes "_", and
+    # the label is cut so the timestamp (16 characters with its "_") fits.
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", label).strip(".")[:16] or "simulation"
+    return safe_ticker_component(f"{stem}_{datetime.now():%Y%m%d_%H%M%S}")
 
 
 def _session_analysts(analysts: str | None, asset_type: str | None, names: list[str]):

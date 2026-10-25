@@ -13,8 +13,10 @@ import pytest
 from typer.testing import CliRunner
 
 import cli.main as m
-from tests.test_execution import FREE, _config
+import tradingagents.execution.simulator as sim
+from tests.test_execution import DAYS, FREE, _closes, _config
 from tradingagents.execution import PaperBroker, run_session
+from tradingagents.memory import TradingMemoryLog
 
 
 class _OneRating:
@@ -73,3 +75,28 @@ def test_paper_hands_the_session_canonical_tickers_and_detects_a_coin(tmp_path, 
     result = CliRunner().invoke(m.app, ["paper", "btcusd,BTC-USD,ethusdt", "--account", "demo"])
     assert result.exit_code == 0, result.output
     assert seen == {"names": ["BTC-USD", "ETH-USD"], "asset_type": "crypto"}
+
+
+# -- simulate's default output -----------------------------------------------------
+
+def _one_buy_log(path):
+    TradingMemoryLog({"memory_log_path": str(path)}).store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    return path
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["run-id", "log"])
+def test_simulate_saves_a_long_run_id_or_a_spaced_log_name_by_default(source, tmp_path, monkeypatch):
+    run_id = "sweep-" + "x" * 26                     # 32 characters, as backtest allows
+    results = tmp_path / "results"
+    if source == "run-id":
+        _one_buy_log(results / "backtest" / run_id / "trading_memory.md")
+        args = ["--run-id", run_id]
+    else:
+        args = ["--log", str(_one_buy_log(tmp_path / "my trading log.md"))]
+    monkeypatch.setattr(sim, "get_closes", _closes({"AAPL": dict(zip(DAYS, [100] * 5, strict=True))}))
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "results_dir", str(results))
+    result = CliRunner().invoke(m.app, ["simulate", *args, "--end", "2026-01-09", "--benchmark", ""])
+    assert result.exit_code == 0, result.output
+    [saved] = (results / "simulations").glob("*/metrics.json")
+    assert len(saved.parent.name) <= 32 and " " not in saved.parent.name
