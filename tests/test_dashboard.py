@@ -448,3 +448,40 @@ def test_the_app_recomputes_a_model_when_the_date_moves(tmp_path, monkeypatch):
     monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-09")
     at.run()
     assert any(m.label.endswith("as of 2026-03-09") for m in at.metric)
+
+
+@pytest.mark.unit
+def test_a_failed_overlay_warns_and_the_other_tabs_still_render(tmp_path, monkeypatch):
+    if not M.chronos_available():
+        pytest.skip("Chronos is not installed")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the network diverged")
+
+    monkeypatch.setattr(M, "walk_forward", broken)
+    at = _app(tmp_path, monkeypatch)      # offline, with no model on disk: Chronos cannot load
+    at.run()
+    next(t for t in at.text_input if t.label == "Ticker (or pick below)").input("AAPL").run()
+    next(c for c in at.checkbox if c.label == "MLP P(up)").check().run()
+    next(c for c in at.checkbox if c.label == "Chronos forecast").check().run()
+    assert not at.exception
+    warnings = " ".join(w.value for w in at.warning)
+    assert "MLP" in warnings and "Chronos" in warnings
+    assert any(s.value == "Analyst reports" for s in at.subheader)        # Research
+    assert any(b.label == "Train and evaluate" for b in at.button)        # Models
+
+
+@pytest.mark.unit
+def test_a_tab_that_fails_shows_its_error_and_the_tabs_after_it_render(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("no signal")
+
+    monkeypatch.setattr(A, "forward_returns", broken)
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert [e.message for e in at.exception] == ["no signal", "no signal"]   # Signals, Signal quality
+    assert any(s.value == "Analyst reports" for s in at.subheader)
+    assert any(b.label == "Train and evaluate" for b in at.button)

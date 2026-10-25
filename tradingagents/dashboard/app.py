@@ -362,11 +362,14 @@ def signals_page(decisions: pd.DataFrame, account: S.Account | None, benchmark: 
         try:
             wf = walk_forward(ticker, 5, "mlp", 252, 21, TODAY)
             overlays["probability"] = wf.probability[wf.probability.index >= shown.index[0]]
-        except ValueError as exc:
-            st.warning(str(exc))
+        except Exception as exc:  # an overlay that fails is left off; the chart still draws
+            st.warning(f"No MLP overlay: {exc}")
     if want_chronos:
-        overlays["forecast"] = chronos_forecast(ticker, 20, 512, TODAY)
-    fr = forward_table(decisions, benchmark, TODAY) if not decisions.empty else None
+        try:
+            overlays["forecast"] = chronos_forecast(ticker, 20, 512, TODAY)
+        except Exception as exc:  # offline, or the model hub is down
+            st.warning(f"No Chronos overlay: {exc}")
+    fr =forward_table(decisions, benchmark, TODAY) if not decisions.empty else None
     st.plotly_chart(price_chart(ticker, shown, decisions, fills, fr, overlays), width="stretch")
     if fr is not None:
         own = fr[fr["ticker"] == ticker]
@@ -636,19 +639,16 @@ def main():
     except Exception as exc:  # a broken artifact is reported, and the other tabs still work
         st.sidebar.error(f"Could not load the account: {exc}")
 
-    tabs = st.tabs(["Portfolio", "Trades", "Signals", "Signal quality", "Research", "Models"])
-    with tabs[0]:
-        portfolio_page(account)
-    with tabs[1]:
-        trades_page(account)
-    with tabs[2]:
-        signals_page(decisions, account, benchmark)
-    with tabs[3]:
-        quality_page(decisions, benchmark)
-    with tabs[4]:
-        research_page(decisions, sources)
-    with tabs[5]:
-        models_page(decisions)
+    pages = {"Portfolio": lambda: portfolio_page(account), "Trades": lambda: trades_page(account),
+             "Signals": lambda: signals_page(decisions, account, benchmark),
+             "Signal quality": lambda: quality_page(decisions, benchmark),
+             "Research": lambda: research_page(decisions, sources), "Models": lambda: models_page(decisions)}
+    for tab, render in zip(st.tabs(list(pages)), pages.values(), strict=True):
+        with tab:
+            try:
+                render()
+            except Exception as exc:  # a failing tab shows its error; the tabs after it still render
+                st.exception(exc)
 
 
 main()
