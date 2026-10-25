@@ -8,14 +8,19 @@ tools read.
 Live trading needs two separate yeses: ``paper=False`` from the caller, and
 ``TRADINGAGENTS_LIVE_TRADING=1`` in the environment. Neither alone is enough, so
 no flag typed by habit, and no config file copied between machines, can place a
-real order. Each order also carries a client order id built from the date,
-ticker and side; Alpaca refuses a second order with the same id, so re-running
-a session on the same day cannot double an order.
+real order. A session counts the orders still open at Alpaca as part of the
+position it plans from, so re-running it (the next morning, after an order was
+queued overnight for the open) does not send the same trade twice. Each order's
+client order id carries the exchange date, ticker and side, plus a suffix that
+makes every attempt unique, so a retry after a rejected order is not refused.
 """
 
 from __future__ import annotations
 
 import os
+import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -29,6 +34,12 @@ LIVE_UNLOCK_ENV = "TRADINGAGENTS_LIVE_TRADING"
 
 def live_trading_unlocked() -> bool:
     return os.getenv(LIVE_UNLOCK_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def client_order_id(order: Order) -> str:
+    """``tradingagents-<US exchange date>-<TICKER>-<side>-<unique suffix>``."""
+    day = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    return f"tradingagents-{day}-{order.ticker.upper()}-{order.side}-{uuid.uuid4().hex[:8]}"
 
 
 class AlpacaBroker:
@@ -84,6 +95,19 @@ class AlpacaBroker:
                                 average_price=float(p["avg_entry_price"])) for p in positions],
         )
 
+    def open_orders(self) -> list[Order]:
+        """The unfilled part of every order still working at Alpaca."""
+        working = []
+        for placed in self._request("GET", "/v2/orders", params={"status": "open", "limit": 500}):
+            # A notional (dollar-amount) order has no quantity to net; this
+            # package never places one.
+            if placed.get("qty") is None:
+                continue
+            remaining = float(placed["qty"]) - float(placed.get("filled_qty") or 0)
+            if remaining > 0:
+                working.append(Order(placed["symbol"].upper(), placed["side"], remaining))
+        return working
+
     def equity(self, prices: dict[str, float]) -> float:
         # Alpaca marks the book itself, with fresher prices than the caller has.
         return float(self.account()["equity"])
@@ -105,7 +129,7 @@ class AlpacaBroker:
             "side": order.side,
             "type": "market",
             "time_in_force": "day",
-            "client_order_id": f"tradingagents-{date}-{order.ticker.upper()}-{order.side}",
+            "client_order_id": client_order_id(order),
         })
         filled_price = placed.get("filled_avg_price")
         return Fill(

@@ -109,18 +109,34 @@ def run_session(
                 marks[held.ticker.upper()] = price(held.ticker, date)
     equity = broker.equity(marks)
     cap = getattr(broker, "max_order_notional", None)
+    # Orders still working at the venue (a buy queued overnight) already move
+    # the position; a re-run must count them or it orders the same trade again.
+    pending: dict[str, float] = {}
+    committed = 0.0
+    for order in broker.open_orders() if hasattr(broker, "open_orders") else []:
+        ticker = order.ticker.upper()
+        pending[ticker] = pending.get(ticker, 0.0) + order.signed()
+        if order.side == "buy":
+            if ticker not in marks:
+                with contextlib.suppress(Exception):
+                    marks[ticker] = price(ticker, date)
+            committed += order.quantity * marks.get(ticker, 0.0)
     for step in steps:
         if step.error or step.price is None:
             continue
         held = book.position_in(step.ticker)
-        current = held.quantity if held else 0.0
+        current = (held.quantity if held else 0.0) + pending.get(step.ticker, 0.0)
         step.order = plan_order(step.ticker, step.rating, equity, step.price, current, rules)
         if step.order is not None and cap is not None:
             step.order, step.note = _within_cap(step.order, step.price, current, cap, rules)
+        if pending.get(step.ticker):
+            opened = f"{pending[step.ticker]:+g} already on order"
+            step.note = f"{opened}; {step.note}" if step.note else opened
 
+    cash = book.cash - committed
     sells = [s for s in steps if s.order is not None and s.order.side == "sell"]
     buys = [s for s in steps if s.order is not None and s.order.side == "buy"]
-    _fund(buys, book.cash + sum(s.order.quantity * s.price for s in sells), rules)
+    _fund(buys, cash + sum(s.order.quantity * s.price for s in sells), rules)
 
     planned = sells + [s for s in buys if s.order is not None]
     if not submit or not planned or (confirm is not None and not confirm(steps)):
@@ -129,7 +145,7 @@ def run_session(
         _send(broker, step, date)
     freed = sum(s.fill.quantity * s.price for s in sells
                 if s.fill is not None and s.fill.status != "rejected")
-    _fund(buys, book.cash + freed, rules)
+    _fund(buys, cash + freed, rules)
     for step in buys:
         if step.order is not None:
             _send(broker, step, date)

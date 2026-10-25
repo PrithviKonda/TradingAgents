@@ -284,9 +284,20 @@ def test_alpaca_reports_the_book_and_places_a_market_order(keys):
 
     fill = broker.submit(Order("aapl", "buy", 2), 210.0, "2026-01-05")
     assert (fill.status, fill.order_id, fill.quantity) == ("accepted", "abc", 2)
-    body = session.sent[-1][2]
-    assert body == {"symbol": "AAPL", "qty": "2", "side": "buy", "type": "market", "time_in_force": "day",
-                    "client_order_id": "tradingagents-2026-01-05-AAPL-buy"}
+    body = dict(session.sent[-1][2])
+    assert body.pop("client_order_id").startswith("tradingagents-")
+    assert body == {"symbol": "AAPL", "qty": "2", "side": "buy", "type": "market", "time_in_force": "day"}
+
+
+@pytest.mark.unit
+def test_every_order_attempt_gets_its_own_client_order_id(keys):
+    # Alpaca refuses a reused id, so a retry after a rejection must not reuse one.
+    session = _FakeSession({("POST", "/v2/orders"): (200, {"id": "abc", "status": "accepted"})})
+    broker = alpaca.AlpacaBroker(session=session)
+    for _ in range(2):
+        broker.submit(Order("AAPL", "buy", 1), 1.0, "2026-01-05")
+    first, second = (o["client_order_id"] for o in session.orders())
+    assert first != second and first.rsplit("-", 1)[0].endswith("-AAPL-buy")
 
 
 @pytest.mark.unit
@@ -359,8 +370,10 @@ def test_one_failed_analysis_does_not_cancel_the_other_trades():
     assert broker.quantity("MSFT") == 50
 
 
-def _alpaca(cash, equity, positions=(), cap=10_000, post=(200, {"id": "x", "status": "accepted"})):
+def _alpaca(cash, equity, positions=(), cap=10_000, post=(200, {"id": "x", "status": "accepted"}),
+            open_orders=()):
     session = _FakeSession({
+        ("GET", "/v2/orders"): (200, list(open_orders)),
         ("GET", "/v2/account"): (200, {"cash": str(cash), "equity": str(equity), "currency": "USD"}),
         ("GET", "/v2/positions"): (200, [{"symbol": t, "qty": str(q), "avg_entry_price": "50"}
                                          for t, q in positions]),
@@ -406,6 +419,17 @@ def test_a_refused_sell_leaves_its_buys_cut_to_the_cash_actually_there(keys):
     # The plan counted on the sell's 15,000; with it refused only 2,000 is there.
     assert steps["MSFT"].order == Order("MSFT", "buy", 40)
     assert [(o["side"], o["qty"]) for o in session.orders()] == [("sell", "300"), ("buy", "40")]
+
+
+@pytest.mark.unit
+def test_a_rerun_counts_the_orders_still_open_and_does_not_double_them(keys):
+    # Last night's run queued a buy of 200 NVDA for the open; this morning's run
+    # (a new date) must see it rather than send the same buy again.
+    queued = {"symbol": "NVDA", "side": "buy", "qty": "200", "filled_qty": "0"}
+    broker, session = _alpaca(cash=100_000, equity=100_000, open_orders=[queued])
+    steps = _alpaca_session(broker, {"NVDA": "Buy"})
+    assert steps[0].order is None and "+200 already on order" in steps[0].describe()
+    assert session.orders() == []
 
 
 @pytest.mark.unit
