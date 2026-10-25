@@ -153,6 +153,46 @@ def test_split_data_that_cannot_be_read_does_not_lock_the_account(tmp_path):
 
 
 @pytest.mark.unit
+def test_two_sessions_on_one_paper_account_both_keep_their_fills(tmp_path):
+    path = tmp_path / "main.json"
+    first = PaperBroker.open(path, starting_cash=100_000, costs=FREE)
+    second = PaperBroker.open(path, starting_cash=100_000, costs=FREE)   # opened before first trades
+    first.submit(Order("AAPL", "buy", 100), 100.0, "2026-01-05")
+    second.submit(Order("MSFT", "buy", 100), 100.0, "2026-01-05")
+    saved = PaperBroker.open(path, starting_cash=0, costs=FREE)
+    assert saved.cash == pytest.approx(80_000)
+    assert [f.ticker for f in saved.fills] == ["AAPL", "MSFT"]
+
+
+@pytest.mark.unit
+def test_concurrent_writers_never_lose_a_fill_or_trip_over_a_temp_file(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "main.json"
+    PaperBroker.open(path, starting_cash=1_000_000, costs=FREE)
+
+    def trade(worker):
+        broker = PaperBroker.open(path, starting_cash=0, costs=FREE)
+        for _ in range(25):
+            broker.submit(Order(f"T{worker}", "buy", 1), 10.0, "2026-01-05")
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(trade, range(8)))          # re-raises any worker's error
+    saved = PaperBroker.open(path, starting_cash=0, costs=FREE)
+    assert len(saved.fills) == 200 and saved.cash == pytest.approx(1_000_000 - 2_000)
+
+
+@pytest.mark.unit
+def test_an_order_that_cannot_be_saved_is_not_applied(tmp_path, monkeypatch):
+    path = tmp_path / "main.json"
+    broker = PaperBroker.open(path, starting_cash=1_000, costs=FREE)
+    monkeypatch.setattr(PaperBroker, "_write", lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        broker.submit(Order("AAPL", "buy", 1), 10.0, "2026-01-05")
+    assert broker.cash == 1_000 and broker.fills == [] and broker.quantity("AAPL") == 0
+
+
+@pytest.mark.unit
 def test_an_unreadable_paper_account_is_reported(tmp_path):
     path = tmp_path / "broken.json"
     path.write_text("{not json", encoding="utf-8")

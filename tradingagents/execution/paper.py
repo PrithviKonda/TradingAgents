@@ -21,12 +21,14 @@ import json
 import logging
 import math
 import os
+import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
+from tradingagents.dataflows.files import locked
 from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
 
@@ -94,30 +96,25 @@ class PaperBroker:
         With ``splits``, any split since a holding's last fill is applied first.
         """
         path = Path(path)
-        if not path.exists():
-            broker = cls(cash=starting_cash, path=path, **kwargs)
-            broker.save()
-            return broker
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            broker = cls(cash=float(data["cash"]), path=path,
-                         starting_cash=float(data.get("starting_cash", data["cash"])),
-                         currency=data.get("currency", "USD"), **kwargs)
-            broker.holdings = {t: _Holding(float(h["quantity"]), float(h["average_price"]))
-                               for t, h in data.get("positions", {}).items()}
-            broker.fills = [Fill(**f) for f in data.get("fills", [])]
-            broker.adjustments = list(data.get("adjustments", []))
-        except (OSError, KeyError, TypeError, ValueError) as exc:
-            raise BrokerError(f"paper account {path} is not readable: {exc}") from exc
-        if splits is not None and broker.apply_splits(splits):
-            broker.save()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        broker = cls(cash=starting_cash, path=path, **kwargs)
+        with locked(path):
+            if not path.exists():
+                broker._write()
+                return broker
+            broker._reload()
+            if splits is not None and broker.apply_splits(splits):
+                broker._write()
         return broker
 
     def save(self) -> None:
         if self.path is None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        with locked(self.path):
+            self._write()
+
+    def _state(self) -> dict:
+        return {
             "cash": self.cash,
             "starting_cash": self.starting_cash,
             "currency": self.currency,
@@ -125,11 +122,34 @@ class PaperBroker:
             "fills": [asdict(f) for f in self.fills],
             "adjustments": self.adjustments,
         }
-        # Written beside the target and renamed over it, so an interrupted
-        # write leaves the previous account rather than half of a new one.
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+
+    def _write(self) -> None:
+        """Write the account; the caller holds the lock on ``path``."""
+        data = json.dumps(self._state(), indent=2)
+        # Through a uniquely named temp file renamed over the target, so an
+        # interrupted write leaves the previous account rather than half of a
+        # new one, and two writers never share (and remove) one temp file.
+        temp = self.path.with_name(f"{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_text(data, encoding="utf-8")
+            os.replace(temp, self.path)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+
+    def _reload(self) -> None:
+        """Replace the in-memory account with the one on disk."""
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self.cash = float(data["cash"])
+            self.starting_cash = float(data.get("starting_cash", data["cash"]))
+            self.currency = data.get("currency", "USD")
+            self.holdings = {t: _Holding(float(h["quantity"]), float(h["average_price"]))
+                             for t, h in data.get("positions", {}).items()}
+            self.fills = [Fill(**f) for f in data.get("fills", [])]
+            self.adjustments = list(data.get("adjustments", []))
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise BrokerError(f"paper account {self.path} is not readable: {exc}") from exc
 
     def apply_splits(self, splits: SplitSource) -> list[dict]:
         """Apply each split since a holding's last fill; returns the adjustments made."""
@@ -178,6 +198,22 @@ class PaperBroker:
     def submit(self, order: Order, price: float, date: str) -> Fill:
         if price <= 0 or not math.isfinite(price):
             raise BrokerError(f"no usable price for {order.ticker}: {price}")
+        if self.path is None:
+            return self._fill(order, price, date)
+        # Another session may have traded this account since it was opened:
+        # re-read it under the lock, so its fills are built on, not overwritten.
+        with locked(self.path):
+            self._reload()
+            before = self._state()
+            fill = self._fill(order, price, date)
+            try:
+                self._write()
+            except BaseException:
+                self._restore(before)      # not saved, so not applied
+                raise
+        return fill
+
+    def _fill(self, order: Order, price: float, date: str) -> Fill:
         ticker = order.ticker.upper()
         quantity = order.quantity
         held = self.quantity(ticker)
@@ -203,8 +239,13 @@ class PaperBroker:
         fill = Fill(ticker, order.side, quantity, round(fill_price, 6),
                     commission=round(commission, 6), date=date)
         self.fills.append(fill)
-        self.save()
         return fill
+
+    def _restore(self, state: dict) -> None:
+        self.cash = state["cash"]
+        self.holdings = {t: _Holding(**h) for t, h in state["positions"].items()}
+        self.fills = [Fill(**f) for f in state["fills"]]
+        self.adjustments = state["adjustments"]
 
     # -- internals -------------------------------------------------------------
 
