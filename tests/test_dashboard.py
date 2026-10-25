@@ -663,3 +663,18 @@ def test_the_dashboard_command_asks_for_the_extra_when_streamlit_is_missing(monk
     assert result.exit_code == 1
     assert 'pip install "tradingagents[dashboard]"' in result.output
     assert launched == []
+
+
+@pytest.mark.unit
+def test_rolling_ic_is_each_trailing_windows_spearman_over_complete_pairs():
+    score = [1, 0.5, 0, -0.5, -1, 1, np.nan, 0.5, 0.5, -1, 0, 1]
+    ret = [0.03, 0.01, 0.01, np.nan, -0.02, 0.02, 0.05, 0.00, 0.01, -0.01, 0.00, 0.04]
+    fr = pd.DataFrame({"date": pd.bdate_range("2026-01-05", periods=len(score)), "score": score, "excess_5": ret})
+    rolling = A.rolling_ic(fr, 5, 5, excess=True)
+    for end, ic in rolling.items():
+        window = fr[fr["date"] <= end].tail(5).dropna()
+        assert ic == pytest.approx(window["score"].corr(window["excess_5"], method="spearman"))
+    assert len(rolling) == len(fr) - 4
+    # Too few decisions for a window, or a window with no spread, has no IC.
+    assert A.rolling_ic(fr.head(4), 5, 5).empty
+    assert A.rolling_ic(fr.assign(score=1.0), 5, 5).empty

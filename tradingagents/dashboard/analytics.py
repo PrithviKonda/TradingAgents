@@ -19,6 +19,7 @@ from collections import deque
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from tradingagents.execution.metrics import TRADING_DAYS, curve_drawdown, curve_returns, curve_stats
 from tradingagents.memory.settlement import benchmark_return
@@ -325,13 +326,30 @@ def information_coefficient(fr: pd.DataFrame, horizon: int = 5, excess: bool = T
     return _spearman(fr["score"], _target(fr, horizon, excess))
 
 
+def _window_ranks(x: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    # Average ranks within each row among its valid entries, as Series.rank() gives.
+    xi, xj, vj = x[:, :, None], x[:, None, :], valid[:, None, :]
+    below = ((xj < xi) & vj).sum(axis=2)
+    equal = ((xj == xi) & vj).sum(axis=2)
+    return np.where(valid, below + (equal + 1) / 2, np.nan)
+
+
 def rolling_ic(fr: pd.DataFrame, horizon: int = 5, window: int = 20, excess: bool = True) -> pd.Series:
     """The IC over each trailing ``window`` decisions, in date order."""
     ordered = fr.sort_values("date", kind="stable").reset_index(drop=True)
-    target = _target(ordered, horizon, excess)
-    values = [(_spearman(ordered["score"].iloc[i - window:i], target.iloc[i - window:i])
-               if i >= window else np.nan) for i in range(1, len(ordered) + 1)]
-    return pd.Series(values, index=ordered["date"], name="ic").dropna()
+    if len(ordered) < window:
+        return pd.Series(dtype=float, name="ic", index=pd.DatetimeIndex([], name="date"))
+    score = sliding_window_view(ordered["score"].to_numpy(dtype=float), window)
+    target = sliding_window_view(_target(ordered, horizon, excess).to_numpy(dtype=float), window)
+    # Each window's Spearman over the decisions with both a score and a return.
+    valid = ~np.isnan(score) & ~np.isnan(target)
+    a, b = _window_ranks(score, valid), _window_ranks(target, valid)
+    count = valid.sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        a, b = a - np.nanmean(a, axis=1, keepdims=True), b - np.nanmean(b, axis=1, keepdims=True)
+        ic = np.nansum(a * b, axis=1) / np.sqrt(np.nansum(a * a, axis=1) * np.nansum(b * b, axis=1))
+    ic[(count < 3) | ~np.isfinite(ic)] = np.nan
+    return pd.Series(ic, index=ordered["date"].iloc[window - 1:], name="ic").dropna()
 
 
 def signal_decay(fr: pd.DataFrame, horizons=HORIZONS, excess: bool = True) -> pd.DataFrame:
