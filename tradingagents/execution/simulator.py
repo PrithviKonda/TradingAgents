@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import EllipsisType
 
 import pandas as pd
 
@@ -31,6 +32,7 @@ from tradingagents.execution.broker import Fill
 from tradingagents.execution.paper import CostModel, PaperBroker, _Holding
 from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 from tradingagents.memory import TradingMemoryLog
+from tradingagents.memory.settlement import resolve_benchmark
 from tradingagents.portfolio import PortfolioContext, Position
 
 TRADING_DAYS = 252
@@ -110,16 +112,30 @@ class SimulationResult:
         return directory
 
 
+def default_benchmark(tickers: list[str], config: dict) -> str:
+    """The benchmark settlement scores ``tickers`` against, as one for the whole account.
+
+    ``benchmark_ticker`` (``TRADINGAGENTS_BENCHMARK_TICKER``) when set; else the
+    ``benchmark_map`` entry they share when they trade in one market (all
+    ``.T``, say); else the map's default, SPY unless configured otherwise.
+    """
+    found = {resolve_benchmark(t, config) for t in tickers}
+    return found.pop() if len(found) == 1 else resolve_benchmark("", config)
+
+
 def simulate(
     decisions: list[Decision],
     config: dict,
     starting_cash: float | None = None,
     end_date: str | None = None,
-    benchmark: str | None = "SPY",
+    benchmark: str | EllipsisType | None = ...,
     closes: CloseSource | None = None,
     book: PortfolioContext | None = None,
 ) -> SimulationResult:
     """Trade ``decisions`` through a paper account and mark it daily to ``end_date``.
+
+    ``benchmark`` is the buy-and-hold comparison: left out, the configured one
+    (``default_benchmark``); None or empty, none.
 
     The account starts all cash, or, given ``book``, holding its positions
     (valued at their last close on or before the first decision) and its cash
@@ -212,6 +228,8 @@ def simulate(
 
     equity_curve = pd.Series(curve, name="equity")
     bench_curve = None
+    if benchmark is ...:
+        benchmark = default_benchmark(sorted({d.ticker for d in decisions}), config)
     if benchmark:
         bench = _daily(closes(benchmark, start, fetch_end))
         bench = bench[bench.index > pd.Timestamp(start)].reindex(equity_curve.index).ffill().dropna()

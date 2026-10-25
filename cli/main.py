@@ -52,6 +52,9 @@ app = typer.Typer(
     add_completion=True,  # Enable shell completion
 )
 
+_BENCHMARK_HELP = ("Buy-and-hold comparison; empty to skip (default: benchmark_ticker, "
+                   "else the benchmark_map entry for the tickers' market, else SPY)")
+
 
 @app.callback(invoke_without_command=True)
 def analyze(
@@ -143,6 +146,7 @@ def backtest(
     simulate_book: bool = typer.Option(
         False, "--simulate", help="Also trade the sweep's decisions through a simulated account"
     ),
+    benchmark: str = typer.Option(None, "--benchmark", help=f"With --simulate: {_BENCHMARK_HELP}"),
 ):
     """Score past decisions over a grid of tickers and dates."""
 
@@ -185,7 +189,7 @@ def backtest(
         console.print("")
         # The account opens holding the --portfolio book the sweep was rated against.
         _print_simulation(result.log_path, cash=None, max_position=None, end=None,
-                          benchmark="SPY", out=result.log_path.parent / "simulation", book=book)
+                          benchmark=benchmark, out=result.log_path.parent / "simulation", book=book)
 
 
 def _tickers(text: str | None) -> list[str]:
@@ -197,8 +201,9 @@ def _print_simulation(log_path: Path, cash, max_position, end, benchmark, out, b
     config = _with_execution(DEFAULT_CONFIG, max_position_pct=max_position)
     try:
         decisions = decisions_from_log(log_path)
+        # No --benchmark is the configured one; an empty one is none.
         result = simulate_decisions(decisions, config, starting_cash=cash, end_date=end,
-                                    benchmark=benchmark or None, book=book)
+                                    benchmark=... if benchmark is None else benchmark or None, book=book)
         saved = result.write(out) if out else None
     except (OSError, ValueError, VendorError) as exc:   # a missing log, an unusable one, a price outage
         console.print(f"[red]{escape(str(exc))}[/red]")
@@ -221,7 +226,7 @@ def simulate(
     cash: float = typer.Option(None, "--cash", help="Starting cash (default: execution.starting_cash)"),
     max_position: float = typer.Option(None, "--max-position", help="Largest position as a share of equity, e.g. 0.1"),
     end: str = typer.Option(None, "--end", help="Mark the account to this date, YYYY-MM-DD (default: today)"),
-    benchmark: str = typer.Option("SPY", "--benchmark", help="Buy-and-hold comparison; empty to skip"),
+    benchmark: str = typer.Option(None, "--benchmark", help=_BENCHMARK_HELP),
     out: str = typer.Option(
         None, "--out",
         help="Directory for equity.csv, fills.csv and metrics.json (default: results_dir/simulations/<name>)",

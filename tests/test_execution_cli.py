@@ -204,3 +204,51 @@ def test_backtest_simulates_the_book_it_was_given(tmp_path, monkeypatch):
     CliRunner().invoke(m.app, ["backtest", "NVDA", "--start", "2026-01-05", "--end", "2026-01-05",
                                "--portfolio", str(portfolio), "--simulate"])
     assert seen["book"].cash == 500 and seen["book"].position_in("NVDA").quantity == 3
+
+
+# -- the benchmark follows the config ----------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tickers, configured, expected", [
+    (["7203.T"], {}, "^N225"),                                 # one market: its benchmark_map entry
+    (["7203.T", "AAPL"], {}, "SPY"),                           # several: the map's default
+    (["7203.T"], {"benchmark_ticker": "qqq"}, "QQQ"),          # benchmark_ticker overrides the map
+])
+def test_a_simulation_benchmarks_what_settlement_would(tickers, configured, expected):
+    flat = dict(zip(DAYS, [100] * 5, strict=True))
+    prices = _closes(dict.fromkeys([*tickers, "SPY", "^N225", "QQQ"], flat))
+    config = {**_config(), "benchmark_map": {".T": "^N225", "": "SPY"}, **configured}
+    result = simulate([Decision("2026-01-05", t, "Buy") for t in tickers], config, starting_cash=1_000,
+                      end_date="2026-01-09", closes=prices)
+    assert result.metrics["benchmark"] == expected
+
+
+@pytest.mark.unit
+def test_simulate_without_a_benchmark_flag_uses_the_configured_one(tmp_path, monkeypatch):
+    flat = dict(zip(DAYS, [100] * 5, strict=True))
+    monkeypatch.setattr(sim, "get_closes", _closes({"AAPL": flat, "QQQ": flat}))
+    monkeypatch.setitem(m.DEFAULT_CONFIG, "benchmark_ticker", "QQQ")
+    log = _one_buy_log(tmp_path / "trading_memory.md")
+    result = CliRunner().invoke(m.app, ["simulate", "--log", str(log), "--end", "2026-01-09",
+                                        "--out", str(tmp_path / "out")])
+    assert result.exit_code == 0, result.output
+    assert "Benchmark QQQ" in result.output
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flag, passed", [([], ...), (["--benchmark", "QQQ"], "QQQ"), (["--benchmark", ""], None)])
+def test_backtest_simulate_takes_a_benchmark(flag, passed, tmp_path, monkeypatch):
+    log = _one_buy_log(tmp_path / "sweep" / "trading_memory.md")
+    swept = SimpleNamespace(cells_run=1, skipped=0, log_path=log, run_id="r", failures=[], settlement_failures=[])
+    monkeypatch.setattr(m, "run_backtest", lambda *a, **k: swept)
+    monkeypatch.setattr(m, "summarize", lambda result: SimpleNamespace(render=lambda: ""))
+    seen = {}
+
+    def fake_simulate(decisions, config, **kwargs):
+        seen["benchmark"] = kwargs["benchmark"]
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(m, "simulate_decisions", fake_simulate)
+    result = CliRunner().invoke(m.app, ["backtest", "NVDA", "--start", "2026-01-05", "--end", "2026-01-05",
+                                        "--simulate", *flag])
+    assert seen == {"benchmark": passed}, result.output
