@@ -68,23 +68,27 @@ def _sim_closes(ticker: str, start: str, end_exclusive: str) -> pd.Series:
     return closes(ticker, start, end)
 
 
+# A cached read takes everything its answer depends on: ``stamp`` is the
+# artifact's modification time and ``today`` the end of its price window.
+# st.cache_data leaves parameters with a leading underscore out of the key.
+
 @st.cache_data(show_spinner=False)
-def load_simulation(path: str, _stamp: float) -> S.Account:
+def load_simulation(path: str, stamp: float) -> S.Account:
     return S.load_simulation(path)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_paper(path: str, _stamp: float) -> S.Account:
-    return S.load_paper(path, closes=closes, end_date=TODAY)
+def load_paper(path: str, stamp: float, today: str) -> S.Account:
+    return S.load_paper(path, closes=closes, end_date=today)
 
 
 @st.cache_data(show_spinner=False)
-def load_decisions(path: str, _stamp: float) -> pd.DataFrame:
+def load_decisions(path: str, stamp: float) -> pd.DataFrame:
     return S.load_decisions(path)
 
 
 @st.cache_data(show_spinner="Simulating the decisions…")
-def simulate_log(path: str, _stamp: float, cash: float, max_position: float, slippage: float,
+def simulate_log(path: str, stamp: float, today: str, cash: float, max_position: float, slippage: float,
                  commission: float, benchmark: str) -> S.Account:
     frame = S.load_decisions(path)
     decisions = [Decision(d.date.strftime("%Y-%m-%d"), d.ticker, d.rating) for d in frame.itertuples()
@@ -92,7 +96,7 @@ def simulate_log(path: str, _stamp: float, cash: float, max_position: float, sli
     config = {**DEFAULT_CONFIG, "execution": {**DEFAULT_CONFIG.get("execution", {}),
                                               "max_position_pct": max_position, "slippage_bps": slippage,
                                               "commission_pct": commission}}
-    result = simulate(decisions, config, starting_cash=cash, end_date=TODAY,
+    result = simulate(decisions, config, starting_cash=cash, end_date=today,
                       benchmark=benchmark or None, closes=_sim_closes)
     fills = pd.DataFrame([vars(f) for f in result.fills])
     if not fills.empty:
@@ -100,27 +104,28 @@ def simulate_log(path: str, _stamp: float, cash: float, max_position: float, sli
     return S.Account("simulation", result.equity, fills, result.benchmark, cash)
 
 
-@st.cache_data(show_spinner=False)
-def forward_table(decisions: pd.DataFrame, benchmark: str) -> pd.DataFrame:
+def forward_table(decisions: pd.DataFrame, benchmark: str, today: str) -> pd.DataFrame:
+    # Not cached itself: the closes are, and a failed fetch is retried on the
+    # next rerun rather than kept as an empty series.
     start = (decisions["date"].min() - timedelta(days=7)).strftime("%Y-%m-%d")
     series = {}
     for ticker in decisions["ticker"].unique():
         try:
-            series[ticker] = closes(ticker, start, TODAY)
+            series[ticker] = closes(ticker, start, today)
         except Exception:  # an unpriced ticker scores nothing rather than stopping the page
             series[ticker] = pd.Series(dtype=float)
     bench = None
     if benchmark:
         try:
-            bench = closes(benchmark, start, TODAY)
+            bench = closes(benchmark, start, today)
         except Exception:  # without the benchmark, raw forward returns still score
             bench = None
     return A.forward_returns(decisions, series, bench)
 
 
 @st.cache_data(show_spinner="Training the network walk-forward…")
-def walk_forward(ticker: str, horizon: int, kind: str, min_train: int, step: int) -> M.WalkForward:
-    return M.walk_forward(bars(ticker, TODAY), horizon=horizon, kind=kind, min_train=min_train, step=step)
+def walk_forward(ticker: str, horizon: int, kind: str, min_train: int, step: int, today: str) -> M.WalkForward:
+    return M.walk_forward(bars(ticker, today), horizon=horizon, kind=kind, min_train=min_train, step=step)
 
 
 @st.cache_resource(show_spinner="Loading Chronos-Bolt…")
@@ -129,13 +134,13 @@ def chronos_pipeline():
 
 
 @st.cache_data(show_spinner="Forecasting with Chronos…")
-def chronos_forecast(ticker: str, horizon: int, context: int) -> M.Forecast:
-    return M.chronos_forecast(bars(ticker, TODAY)["Close"], horizon, context, pipeline=chronos_pipeline())
+def chronos_forecast(ticker: str, horizon: int, context: int, today: str) -> M.Forecast:
+    return M.chronos_forecast(bars(ticker, today)["Close"], horizon, context, pipeline=chronos_pipeline())
 
 
 @st.cache_data(show_spinner="Backtesting Chronos over past origins…")
-def chronos_backtest(ticker: str, horizon: int, origins: int, spacing: int) -> pd.DataFrame:
-    return M.chronos_backtest(bars(ticker, TODAY)["Close"], horizon, origins, spacing,
+def chronos_backtest(ticker: str, horizon: int, origins: int, spacing: int, today: str) -> pd.DataFrame:
+    return M.chronos_backtest(bars(ticker, today)["Close"], horizon, origins, spacing,
                               pipeline=chronos_pipeline())
 
 
@@ -355,13 +360,13 @@ def signals_page(decisions: pd.DataFrame, account: S.Account | None, benchmark: 
     shown = frame[frame.index >= frame.index[-1] - pd.DateOffset(months=months)]
     if want_mlp:
         try:
-            wf = walk_forward(ticker, 5, "mlp", 252, 21)
+            wf = walk_forward(ticker, 5, "mlp", 252, 21, TODAY)
             overlays["probability"] = wf.probability[wf.probability.index >= shown.index[0]]
         except ValueError as exc:
             st.warning(str(exc))
     if want_chronos:
-        overlays["forecast"] = chronos_forecast(ticker, 20, 512)
-    fr = forward_table(decisions, benchmark) if not decisions.empty else None
+        overlays["forecast"] = chronos_forecast(ticker, 20, 512, TODAY)
+    fr = forward_table(decisions, benchmark, TODAY) if not decisions.empty else None
     st.plotly_chart(price_chart(ticker, shown, decisions, fills, fr, overlays), width="stretch")
     if fr is not None:
         own = fr[fr["ticker"] == ticker]
@@ -379,7 +384,7 @@ def quality_page(decisions: pd.DataFrame, benchmark: str):
     horizon = c1.selectbox("Horizon (sessions)", list(A.HORIZONS), index=1)
     excess = c2.toggle(f"Excess over {benchmark or 'benchmark'}", value=bool(benchmark), disabled=not benchmark)
     window = c3.slider("Rolling IC window (decisions)", 5, 60, 20)
-    fr = forward_table(scored, benchmark)
+    fr = forward_table(scored, benchmark, TODAY)
     target = f"excess_{horizon}" if excess else f"fwd_{horizon}"
     known = fr[fr[target].notna()]
     directional = known[known["direction"] != 0]
@@ -436,7 +441,7 @@ def quality_page(decisions: pd.DataFrame, benchmark: str):
             probabilities = {}
             for ticker in fr["ticker"].unique():
                 try:
-                    probabilities[ticker] = walk_forward(ticker, horizon, "mlp", 252, 21).probability
+                    probabilities[ticker] = walk_forward(ticker, horizon, "mlp", 252, 21, TODAY).probability
                 except Exception as exc:
                     st.warning(f"{ticker}: {exc}")
             detail, summary = M.agreement(fr, probabilities, horizon, excess)
@@ -507,7 +512,8 @@ def models_page(decisions: pd.DataFrame):
     run = st.session_state.get("mlp_run")
     if run and run[0] == ticker:
         try:
-            mlp, logit = walk_forward(*run[:2], "mlp", *run[2:]), walk_forward(*run[:2], "logistic", *run[2:])
+            mlp = walk_forward(*run[:2], "mlp", *run[2:], TODAY)
+            logit = walk_forward(*run[:2], "logistic", *run[2:], TODAY)
         except Exception as exc:
             st.error(str(exc))
         else:
@@ -559,8 +565,8 @@ def models_page(decisions: pd.DataFrame):
     run = st.session_state.get("chronos_run")
     if run and run[0] == ticker:
         try:
-            forecast = chronos_forecast(ticker, run[1], 512)
-            record = chronos_backtest(ticker, run[4], run[2], run[3])
+            forecast = chronos_forecast(ticker, run[1], 512, TODAY)
+            record = chronos_backtest(ticker, run[4], run[2], run[3], TODAY)
         except Exception as exc:
             st.error(str(exc))
             return
@@ -619,14 +625,14 @@ def main():
                 max_position = st.slider("Max position (% of equity)", 1, 100, 10) / 100
                 slippage = st.slider("Slippage (bps)", 0, 50, 5)
                 commission = st.slider("Commission (bps of notional)", 0, 50, 0) / 10_000
-            account = simulate_log(str(log_path), _mtime(log_path), cash, max_position, float(slippage),
+            account = simulate_log(str(log_path), _mtime(log_path), TODAY, cash, max_position, float(slippage),
                                    commission, benchmark)
         elif choice.startswith("simulation: "):
             path = sims[choice.removeprefix("simulation: ")]
             account = load_simulation(str(path), _mtime(path))
         elif choice.startswith("paper: "):
             path = papers[choice.removeprefix("paper: ")]
-            account = load_paper(str(path), _mtime(path))
+            account = load_paper(str(path), _mtime(path), TODAY)
     except Exception as exc:  # a broken artifact is reported, and the other tabs still work
         st.sidebar.error(f"Could not load the account: {exc}")
 

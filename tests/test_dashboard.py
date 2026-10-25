@@ -369,3 +369,63 @@ def test_the_app_renders_every_tab_from_saved_artifacts(tmp_path, monkeypatch):
     assert not at.exception
     assert any(m.label == "Sharpe" for m in at.metric)
     assert any(m.label == "Closed trades" and m.value == "1" for m in at.metric)
+
+
+def _app(tmp_path, monkeypatch):
+    """The app under AppTest, reading ``tmp_path`` with synthetic prices and no model downloads."""
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    # st.cache_data is process-wide, so one test's prices never reach another's.
+    st.cache_data.clear()
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    def ohlcv(ticker, end=None):
+        frame = _bars(700)
+        frame.index = pd.bdate_range(end=end, periods=700)
+        return frame
+
+    def daily_closes(ticker, start, end):
+        close = ohlcv(ticker, end)["Close"]
+        return close[close.index >= start]
+
+    monkeypatch.setattr(S, "ohlcv", ohlcv)
+    monkeypatch.setattr(S, "daily_closes", daily_closes)
+    app = Path(M.__file__).with_name("app.py")
+    monkeypatch.setattr(sys, "argv", [str(app), "--results-dir", str(tmp_path)])
+    return AppTest.from_file(str(app), default_timeout=120)
+
+
+@pytest.mark.unit
+def test_the_app_rereads_a_decision_log_that_changed(tmp_path, monkeypatch):
+    log = tmp_path / "backtest" / "run1" / "trading_memory.md"
+    memory = TradingMemoryLog({"memory_log_path": str(log)})
+    memory.store_decision("AAPL", "2026-01-05", "Rating: Buy\n\nup")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    at.sidebar.selectbox[0].select("backtest run1").run()
+    assert not at.exception
+    read = next(s for s in at.selectbox if s.label == "Read a decision")
+    assert len(read.options) == 1
+
+    memory.store_decision("MSFT", "2026-01-06", "Rating: Sell\n\ndown")
+    at.run()
+    read = next(s for s in at.selectbox if s.label == "Read a decision")
+    assert len(read.options) == 2
+
+
+@pytest.mark.unit
+def test_the_app_recomputes_a_model_when_the_date_moves(tmp_path, monkeypatch):
+    from tradingagents.dataflows import date_window
+
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-02")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    next(b for b in at.button if b.label == "Train and evaluate").click().run()
+    assert not at.exception
+    assert any(m.label.endswith("as of 2026-03-02") for m in at.metric)
+
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-03-09")
+    at.run()
+    assert any(m.label.endswith("as of 2026-03-09") for m in at.metric)
