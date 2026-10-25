@@ -33,9 +33,10 @@ The provider, models, research depth and language come from prompts, or from
 | `--every N` | 7 | Days between analysis dates |
 | `--analysts` | all | As above |
 | `--asset-type` | stock | `stock` or `crypto` |
-| `--portfolio` | none | A standing book, the same for every cell |
+| `--portfolio` | none | A standing book, the same for every cell; `--simulate` starts from it |
 | `--run-id ID` | new | Continue a sweep; finished cells are skipped |
 | `--simulate` | off | Also replay the sweep through a simulated account |
+| `--benchmark` | configured | With `--simulate`: buy-and-hold comparison; `""` to skip |
 
 ## `simulate` — trade decisions through a simulated account
 
@@ -44,11 +45,11 @@ The provider, models, research depth and language come from prompts, or from
 | Option | Default | Meaning |
 |---|---|---|
 | `--run-id ID` / `--log PATH` | one required | A backtest sweep, or any memory log file |
-| `--cash` | `execution.starting_cash` | Starting cash |
-| `--max-position` | `execution.max_position_pct` | Per-position cap as a fraction, e.g. `0.2` |
+| `--cash` | `execution.starting_cash` | Starting cash; must be above 0 |
+| `--max-position` | `execution.max_position_pct` | Per-position cap as a fraction in (0, 1], e.g. `0.2` |
 | `--end` | today | Mark the account through this date |
-| `--benchmark` | SPY | Buy-and-hold comparison; `""` to skip |
-| `--out DIR` | `results_dir/simulations/<name>` | Where to write `equity.csv`, `fills.csv`, `metrics.json` |
+| `--benchmark` | configured | Buy-and-hold comparison; `""` to skip. Defaults to `benchmark_ticker`, else the market index the tickers share, else SPY |
+| `--out DIR` | `results_dir/simulations/<name>_<timestamp>` | Where to write `equity.csv`, `fills.csv`, `metrics.json` |
 
 ## `paper` — local paper account
 
@@ -56,13 +57,15 @@ The provider, models, research depth and language come from prompts, or from
 
 | Option | Default | Meaning |
 |---|---|---|
-| tickers | — | Comma-separated; omit with `--status` |
+| tickers | — | Comma-separated, canonicalized (`BTCUSD` is `BTC-USD`); omit with `--status` or `--settle` |
 | `--account NAME` | default | Which account file, `results_dir/paper/NAME.json` |
 | `--cash` | `execution.starting_cash` | Funding for a *new* account only |
-| `--date` | today | Analysis date |
-| `--analysts`, `--asset-type` | all, stock | As above |
-| `--dry-run` | off | Analyze and plan, record no fills |
-| `--status` | off | Show the account and exit |
+| `--date` | today | Analysis date; orders fill at the first close after it |
+| `--analysts` | all | As above |
+| `--asset-type` | auto | `stock` or `crypto`; without it, crypto when every ticker is a coin |
+| `--dry-run` | off | Analyze and plan, queue nothing |
+| `--settle` | off | Fill pending orders whose next close is in, and exit |
+| `--status` | off | Show the account, with pending orders, and exit |
 
 ## `trade` — broker
 
@@ -74,13 +77,14 @@ The provider, models, research depth and language come from prompts, or from
 | `--live` | off | Live account; also needs `TRADINGAGENTS_LIVE_TRADING=1` |
 | `--yes` | off | Send without the confirmation prompt |
 | `--dry-run` | off | Plan only; send nothing |
-| `--analysts`, `--asset-type` | all, stock | As above |
+| `--analysts` | all | As above |
+| `--asset-type` | auto | As for `paper` |
 
 Needs `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. See [trading guide](trading.md#4-broker-alpaca-paper-then-live).
 
 ## `dashboard`
 
-`tradingagents dashboard`
+`tradingagents dashboard` (needs the extra: `pip install "tradingagents[dashboard]"`)
 
 | Option | Default | Meaning |
 |---|---|---|

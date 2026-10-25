@@ -564,7 +564,7 @@ def models_page(decisions: pd.DataFrame):
 
     st.subheader("Chronos-Bolt forecast")
     if not M.chronos_available():
-        st.warning("Chronos is not installed in this environment: pip install chronos-forecasting")
+        st.warning('Chronos is not installed in this environment: pip install "tradingagents[dashboard]"')
         return
     d1, d2, d3 = st.columns(3)
     fc_horizon = d1.slider("Forecast sessions ahead", 5, 64, 20)

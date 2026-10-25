@@ -97,7 +97,7 @@ Every grid cell is a full LLM run, so start small.
 
 **5. Paper trade forward.**
 ```bash
-tradingagents paper NVDA,AAPL           # analyze, size and fill in a local paper account
+tradingagents paper NVDA,AAPL           # analyze, size and queue in a local paper account
 tradingagents paper --status
 ```
 
@@ -451,7 +451,7 @@ Each cell is scored on realized alpha against the instrument's regional benchmar
 
 ## Simulating, paper trading and brokers
 
-`tradingagents.execution` turns ratings into orders. Each rating targets a share of a per-position cap (`execution.max_position_pct` of equity): Buy the whole cap, Overweight 75%, Underweight 25%, Sell nothing. Hold keeps the position as it is, and a decision with no readable rating never trades. The simulator, the paper account and a real broker all trade this one rule, and the `execution` block in the config sets the cap, the tier weights, slippage, commission, fractional shares and the largest order a broker may receive.
+`tradingagents.execution` turns ratings into orders. Each rating targets a share of a per-position cap (`execution.max_position_pct` of equity): Buy the whole cap, Overweight 75%, Underweight 25%, Sell nothing. Hold keeps the position as it is, and a decision with no readable rating never trades. The simulator, the paper account and a real broker all trade this one rule, and the `execution` block in the config sets the cap, the tier weights, slippage, commission, fractional shares and the per-order cap (`max_order_pct` of equity, 2% by default), which every session, simulation and broker order is held to; a sell that only reduces a position is exempt.
 
 **Simulate a backtest.** Replay a sweep's decisions through an account to get an equity curve, return, Sharpe ratio, maximum drawdown and the benchmark's buy-and-hold over the same sessions. The sweep's LLM cost is paid once; replay it under any sizing for free.
 
@@ -469,7 +469,7 @@ print(sim.render())
 sim.write("sim")   # equity.csv, fills.csv, metrics.json
 ```
 
-**Paper trade.** Analyze tickers, size the ratings against a local paper account, and fill them at the latest close. The account is saved under `results_dir/paper/` and carries its cash, positions and fills from one session to the next; the agents see its holdings as their portfolio context.
+**Paper trade.** Analyze tickers, size the ratings against a local paper account, and queue the orders. Each fills at the first close after its analysis date, the same entry rule as the simulator, on a later run or with `paper --settle`, so a paper fill never uses the close the analysis read. The account is saved under `results_dir/paper/` and carries its cash, positions, pending orders and fills from one session to the next, adjusted for stock splits; the agents see its holdings as their portfolio context.
 
 ```bash
 tradingagents paper NVDA,AAPL                 # a new account starts with execution.starting_cash
@@ -486,7 +486,7 @@ TRADINGAGENTS_LIVE_TRADING=1 tradingagents trade NVDA --live   # real money
 
 The [trading guide](docs/trading.md) covers sizing with a worked example, simulation timing and Alpaca setup step by step.
 
-Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither a habitual flag nor a copied config can place a real order on its own. Orders over `execution.max_order_notional` (10,000 by default) are refused before they are sent, and each order's client id is built from the date, ticker and side, so re-running a session the same day cannot double an order. Orders are market orders sized at the latest close; the fill comes at the market's price.
+Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither a habitual flag nor a copied config can place a real order on its own. The plan you confirm is already cut to the per-order cap and to the cash on hand, and planning counts the orders still open at Alpaca, so re-running a session (even the morning after an order queued overnight) cannot double an order. Set `execution.max_order_notional` for a dollar ceiling on top while you build trust in live runs. Orders are market orders sized at the latest close; the fill comes at the market's price.
 
 ## Dashboard and neural signals
 

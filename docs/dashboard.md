@@ -1,5 +1,8 @@
 # Dashboard guide
 
+The dashboard is an optional extra: `pip install "tradingagents[dashboard]"` installs
+Streamlit, Plotly, scikit-learn and Chronos (with PyTorch).
+
 ```bash
 tradingagents dashboard                       # opens http://localhost:8501
 tradingagents dashboard --port 8502 --no-browser
@@ -17,7 +20,7 @@ or places orders. Prices come from Yahoo Finance and are cached.
 | **Decision log** | The ratings to study: your live memory log, or any backtest sweep. Drives the Signals, Signal quality and Research tabs. |
 | **Account** | Whose trades to show: a saved simulation, a paper account, or *simulate the selected log*, which replays the chosen log live. |
 | **Simulation settings** | Shown with *simulate the selected log*: starting cash, max position (% of equity), slippage (bps), and commission (bps of notional). They change the replay immediately and are not saved. |
-| **Benchmark** | Ticker for comparison; `SPY` by default. |
+| **Benchmark** | Ticker for comparison; by default the configured `benchmark_ticker`, else the market index the log's tickers share, else `SPY`. |
 
 Nothing shows up? Run a `backtest`, a `simulate`, or a `paper` session first; see
 [trading guide](trading.md). Simulations saved with `--out` outside `results_dir` are not
