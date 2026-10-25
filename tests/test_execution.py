@@ -428,6 +428,31 @@ def test_alpaca_quantities_are_sent_exactly_and_never_rounded_up(keys, quantity,
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("ticker, symbol, tif", [("BRK-B", "BRK.B", "day"), ("BTC-USD", "BTC/USD", "gtc"),
+                                                 ("AAPL", "AAPL", "day")])
+def test_alpaca_orders_use_its_symbols_and_crypto_is_good_till_cancelled(keys, ticker, symbol, tif):
+    session = _FakeSession({("POST", "/v2/orders"): (200, {"id": "abc", "status": "accepted"})})
+    fill = alpaca.AlpacaBroker(session=session).submit(Order(ticker, "buy", 1), 1.0, "2026-01-05")
+    assert (session.orders()[0]["symbol"], session.orders()[0]["time_in_force"]) == (symbol, tif)
+    assert fill.ticker == ticker
+
+
+@pytest.mark.unit
+def test_alpaca_positions_and_open_orders_come_back_as_yahoo_tickers(keys):
+    session = _FakeSession({
+        ("GET", "/v2/account"): (200, {"cash": "100", "equity": "100"}),
+        ("GET", "/v2/positions"): (200, [{"symbol": "BRK.B", "qty": "2", "avg_entry_price": "400"},
+                                         {"symbol": "BTCUSD", "qty": "0.5", "avg_entry_price": "60000",
+                                          "asset_class": "crypto"}]),
+        ("GET", "/v2/orders"): (200, [{"symbol": "ETH/USD", "side": "buy", "qty": "1", "filled_qty": "0"}]),
+    })
+    broker = alpaca.AlpacaBroker(session=session)
+    book = broker.portfolio()
+    assert book.position_in("BRK-B").quantity == 2 and book.position_in("BTC-USD").quantity == 0.5
+    assert broker.open_orders() == [Order("ETH-USD", "buy", 1)]
+
+
+@pytest.mark.unit
 def test_every_order_attempt_gets_its_own_client_order_id(keys):
     # Alpaca refuses a reused id, so a retry after a rejection must not reuse one.
     session = _FakeSession({("POST", "/v2/orders"): (200, {"id": "abc", "status": "accepted"})})

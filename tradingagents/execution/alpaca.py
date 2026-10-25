@@ -13,6 +13,12 @@ position it plans from, so re-running it (the next morning, after an order was
 queued overnight for the open) does not send the same trade twice. Each order's
 client order id carries the exchange date, ticker and side, plus a suffix that
 makes every attempt unique, so a retry after a rejected order is not refused.
+
+Tickers stay in the Yahoo form the rest of the package uses; only the requests
+to Alpaca carry its own symbols. A class share is ``BRK-B`` here and ``BRK.B``
+there, and a crypto pair is ``BTC-USD`` here and ``BTC/USD`` there (Alpaca
+reports a crypto position as ``BTCUSD``). A crypto order is good till
+cancelled, as Alpaca requires; an equity order lasts the day.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from tradingagents.dataflows.symbols import crypto_base
 from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
 
@@ -44,6 +51,18 @@ def format_quantity(quantity: float) -> str:
     """
     exact = Decimal(repr(quantity)).quantize(Decimal("1e-9"), rounding=ROUND_DOWN)
     return f"{exact.normalize():f}"
+
+
+def to_alpaca_symbol(ticker: str) -> str:
+    """``ticker`` as Alpaca spells it: ``BRK-B`` -> ``BRK.B``, ``BTC-USD`` -> ``BTC/USD``."""
+    base = crypto_base(ticker)
+    return f"{base}/USD" if base else ticker.strip().upper().replace("-", ".")
+
+
+def from_alpaca_symbol(symbol: str) -> str:
+    """An Alpaca symbol in the package's Yahoo form; the inverse of ``to_alpaca_symbol``."""
+    base = crypto_base(symbol.replace("/", ""))
+    return f"{base}-USD" if base else symbol.strip().upper().replace(".", "-")
 
 
 def client_order_id(order: Order) -> str:
@@ -100,12 +119,12 @@ class AlpacaBroker:
     def portfolio(self) -> PortfolioContext:
         account = self.account()
         positions = self._request("GET", "/v2/positions")
-        self._held = {p["symbol"].upper(): float(p["qty"]) for p in positions}
+        self._held = {from_alpaca_symbol(p["symbol"]): float(p["qty"]) for p in positions}
         self._equity = float(account.get("equity") or account["cash"])
         return PortfolioContext(
             cash=float(account["cash"]),
             currency=account.get("currency", "USD"),
-            positions=[Position(ticker=p["symbol"], quantity=float(p["qty"]),
+            positions=[Position(ticker=from_alpaca_symbol(p["symbol"]), quantity=float(p["qty"]),
                                 average_price=float(p["avg_entry_price"])) for p in positions],
         )
 
@@ -119,7 +138,7 @@ class AlpacaBroker:
                 continue
             remaining = float(placed["qty"]) - float(placed.get("filled_qty") or 0)
             if remaining > 0:
-                working.append(Order(placed["symbol"].upper(), placed["side"], remaining))
+                working.append(Order(from_alpaca_symbol(placed["symbol"]), placed["side"], remaining))
         return working
 
     def equity(self, prices: dict[str, float]) -> float:
@@ -145,11 +164,12 @@ class AlpacaBroker:
                 f"per-order cap of {limit:,.2f}; not sent"
             )
         placed = self._request("POST", "/v2/orders", json={
-            "symbol": order.ticker.upper(),
+            "symbol": to_alpaca_symbol(order.ticker),
             "qty": format_quantity(order.quantity),
             "side": order.side,
             "type": "market",
-            "time_in_force": "day",
+            # Alpaca takes crypto orders only as gtc or ioc.
+            "time_in_force": "gtc" if crypto_base(order.ticker) else "day",
             "client_order_id": client_order_id(order),
         })
         filled_price = placed.get("filled_avg_price")
