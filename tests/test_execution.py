@@ -116,6 +116,42 @@ def test_a_paper_account_persists_between_sessions(tmp_path):
     assert len(again.fills) == 1
 
 
+def _splits(table):
+    return lambda ticker: pd.Series({pd.Timestamp(d): r for d, r in table.get(ticker, {}).items()}, dtype=float)
+
+
+@pytest.mark.unit
+def test_a_split_since_the_last_fill_is_applied_once_when_the_account_opens(tmp_path):
+    path = tmp_path / "main.json"
+    broker = PaperBroker.open(path, starting_cash=100_000, costs=FREE)
+    broker.submit(Order("NVDA", "buy", 10), 1_000.0, "2026-01-05")
+    # A 10:1 split after the fill, and one before it that the fill already reflects.
+    splits = _splits({"NVDA": {"2025-06-02": 4.0, "2026-01-08": 10.0}})
+
+    opened = PaperBroker.open(path, starting_cash=0, costs=FREE, splits=splits)
+    held = opened.portfolio().position_in("NVDA")
+    assert (held.quantity, held.average_price) == (100, 100)
+    assert opened.equity({"NVDA": 100.0}) == pytest.approx(100_000)       # not 91,000
+    assert opened.adjustments == [{"ticker": "NVDA", "date": "2026-01-08", "ratio": 10.0}]
+
+    again = PaperBroker.open(path, starting_cash=0, costs=FREE, splits=splits)
+    assert again.quantity("NVDA") == 100                                    # applied once, not twice
+    # The Sell rating exits the 100 post-split units at no loss.
+    assert again.submit(Order("NVDA", "sell", 100), 100.0, "2026-01-09").quantity == 100
+    assert again.cash == pytest.approx(100_000)
+
+
+@pytest.mark.unit
+def test_split_data_that_cannot_be_read_does_not_lock_the_account(tmp_path):
+    path = tmp_path / "main.json"
+    PaperBroker.open(path, starting_cash=1_000, costs=FREE).submit(Order("NVDA", "buy", 1), 10.0, "2026-01-05")
+
+    def down(ticker):
+        raise RuntimeError("yahoo is down")
+
+    assert PaperBroker.open(path, starting_cash=0, splits=down).quantity("NVDA") == 1
+
+
 @pytest.mark.unit
 def test_an_unreadable_paper_account_is_reported(tmp_path):
     path = tmp_path / "broken.json"

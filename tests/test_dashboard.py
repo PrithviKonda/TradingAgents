@@ -327,6 +327,24 @@ def test_a_paper_account_is_marked_to_market_from_its_fills(tmp_path):
     assert account.starting_cash == 1_000
 
 
+@pytest.mark.unit
+def test_a_paper_account_replays_across_a_split_in_the_split_adjusted_basis(tmp_path):
+    path = tmp_path / "paper.json"
+    broker = PaperBroker.open(path, starting_cash=10_000, costs=CostModel(slippage_bps=0))
+    broker.submit(Order("NVDA", "buy", 5), 1_000.0, "2026-01-05")
+    PaperBroker.open(path, starting_cash=0, splits=lambda t: pd.Series({pd.Timestamp("2026-01-07"): 10.0}))
+    # Split-adjusted closes: the pre-split 1,000 reads as 100.
+    prices = {"NVDA": _series([100, 100, 100, 100])}          # Jan 5 .. Jan 8
+
+    def closes(ticker, start, end):
+        series = prices[ticker]
+        return series[(series.index >= start) & (series.index <= end)]
+
+    account = S.load_paper(path, closes=closes, end_date="2026-01-08")
+    assert list(account.equity) == [10_000] * 4
+    assert account.fills.iloc[0][["quantity", "price"]].tolist() == [50, 100]
+
+
 # -- the app ---------------------------------------------------------------------------
 
 @pytest.mark.unit

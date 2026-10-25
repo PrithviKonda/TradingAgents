@@ -8,18 +8,32 @@ Fills are deliberately pessimistic: a buy pays ``slippage_bps`` over the
 reference price and a sell receives that much under it, and each fill pays a
 fixed plus a proportional commission. A buy the cash cannot cover is cut to what
 it can; the account is long-only unless ``allow_short`` is set.
+
+Every price source here is split-adjusted, so the ledger has to be too: opened
+with a ``splits`` source, the account applies each split since a holding's last
+fill to its units and average price, and records the adjustment, so a 10:1
+split reads as ten times the units at a tenth of the cost, not a 90% loss.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import pandas as pd
+
 from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
+
+logger = logging.getLogger(__name__)
+
+# splits(ticker) -> new-shares-per-old ratios keyed by ex-date, e.g. 10.0 for 10:1.
+SplitSource = Callable[[str], pd.Series]
 
 
 @dataclass
@@ -62,6 +76,8 @@ class PaperBroker:
     starting_cash: float | None = None
     holdings: dict[str, _Holding] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
+    # Splits applied to the holdings: {"ticker", "date", "ratio"}, oldest first.
+    adjustments: list[dict] = field(default_factory=list)
     name: str = "paper"
 
     def __post_init__(self):
@@ -71,8 +87,12 @@ class PaperBroker:
     # -- persistence ---------------------------------------------------------
 
     @classmethod
-    def open(cls, path: str | Path, starting_cash: float, **kwargs) -> PaperBroker:
-        """The account saved at ``path``, or a new one funded with ``starting_cash``."""
+    def open(cls, path: str | Path, starting_cash: float, splits: SplitSource | None = None,
+             **kwargs) -> PaperBroker:
+        """The account saved at ``path``, or a new one funded with ``starting_cash``.
+
+        With ``splits``, any split since a holding's last fill is applied first.
+        """
         path = Path(path)
         if not path.exists():
             broker = cls(cash=starting_cash, path=path, **kwargs)
@@ -86,8 +106,11 @@ class PaperBroker:
             broker.holdings = {t: _Holding(float(h["quantity"]), float(h["average_price"]))
                                for t, h in data.get("positions", {}).items()}
             broker.fills = [Fill(**f) for f in data.get("fills", [])]
+            broker.adjustments = list(data.get("adjustments", []))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise BrokerError(f"paper account {path} is not readable: {exc}") from exc
+        if splits is not None and broker.apply_splits(splits):
+            broker.save()
         return broker
 
     def save(self) -> None:
@@ -100,12 +123,36 @@ class PaperBroker:
             "currency": self.currency,
             "positions": {t: asdict(h) for t, h in self.holdings.items()},
             "fills": [asdict(f) for f in self.fills],
+            "adjustments": self.adjustments,
         }
         # Written beside the target and renamed over it, so an interrupted
         # write leaves the previous account rather than half of a new one.
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
+
+    def apply_splits(self, splits: SplitSource) -> list[dict]:
+        """Apply each split since a holding's last fill; returns the adjustments made."""
+        made = []
+        done = {(a["ticker"], a["date"]) for a in self.adjustments}
+        for ticker, held in self.holdings.items():
+            # A fill on the ex-date was already at the post-split price.
+            since = max((f.date or "" for f in self.fills if f.ticker == ticker), default="")
+            try:
+                history = splits(ticker)
+            except Exception as exc:  # no split data must not lock the account
+                logger.warning("Could not read splits for %s: %s", ticker, exc)
+                continue
+            for day, ratio in history.sort_index().items():
+                date = pd.Timestamp(day).strftime("%Y-%m-%d")
+                ratio = float(ratio)
+                if date <= since or (ticker, date) in done or not math.isfinite(ratio) or ratio <= 0 or ratio == 1:
+                    continue
+                held.quantity *= ratio
+                held.average_price /= ratio
+                made.append({"ticker": ticker, "date": date, "ratio": ratio})
+        self.adjustments.extend(sorted(made, key=lambda a: (a["date"], a["ticker"])))
+        return made
 
     # -- the Broker interface ------------------------------------------------
 

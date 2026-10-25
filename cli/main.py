@@ -13,6 +13,7 @@ from cli.prompts import filter_analysts_for_asset_type, parse_analysts, parse_ti
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.dataflows.vendors.yahoo.market import get_splits
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.execution import (
     BrokerError,
@@ -278,6 +279,7 @@ def paper(
             costs=CostModel.from_config(DEFAULT_CONFIG),
             allow_short=bool(execution.get("allow_short", False)),
             allow_fractional=bool(execution.get("allow_fractional", False)),
+            splits=get_splits,
         )
     except BrokerError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -301,6 +303,8 @@ def paper(
     console.print(f"Cash: {book.cash:,.2f} {book.currency} · funded with {broker.starting_cash:,.2f}")
     for held in book.positions:
         console.print(f"- {held.ticker}: {held.quantity:g} @ {held.average_price:,.2f} average")
+    for split in broker.adjustments:
+        console.print(f"- split: {split['ticker']} x{split['ratio']:g} on {split['date']}")
     console.print(f"Fills recorded: {len(broker.fills)}")
 
 

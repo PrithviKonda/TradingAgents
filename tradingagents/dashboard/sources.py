@@ -106,9 +106,22 @@ def load_simulation(folder: str | Path) -> Account:
 def load_paper(path: str | Path, closes=None, end_date: str | None = None) -> Account:
     """A paper account, with an equity curve rebuilt by marking its fills to market daily."""
     broker = PaperBroker.open(path, starting_cash=0.0)
-    fills = _fills_frame([{k: getattr(f, k) for k in _FILL_COLUMNS} for f in broker.fills])
+    fills = _split_adjusted(_fills_frame([{k: getattr(f, k) for k in _FILL_COLUMNS} for f in broker.fills]),
+                            broker.adjustments)
     equity = replay_equity(fills, broker.starting_cash, closes or daily_closes, end_date)
     return Account(name=Path(path).stem, equity=equity, fills=fills, starting_cash=broker.starting_cash)
+
+
+def _split_adjusted(fills: pd.DataFrame, adjustments: list[dict]) -> pd.DataFrame:
+    """Fills before each recorded split restated in post-split units, as the closes are."""
+    if fills.empty or not adjustments:
+        return fills
+    fills = fills.copy()
+    for a in adjustments:
+        before = (fills["ticker"] == a["ticker"]) & (fills["date"] < pd.Timestamp(a["date"]))
+        fills.loc[before, "quantity"] *= a["ratio"]
+        fills.loc[before, "price"] /= a["ratio"]
+    return fills
 
 
 def replay_equity(fills: pd.DataFrame, starting_cash: float, closes, end_date: str | None = None) -> pd.Series:
