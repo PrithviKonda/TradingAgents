@@ -22,6 +22,7 @@ from tradingagents.execution import (
     SizingRules,
     alpaca,
     decisions_from_log,
+    order_cap,
     plan_order,
     run_session,
     simulate,
@@ -233,6 +234,16 @@ def test_a_decision_fills_at_the_first_close_after_its_date():
 
 
 @pytest.mark.unit
+def test_a_simulation_is_held_to_the_same_per_order_cap():
+    prices = _closes({"AAPL": dict(zip(DAYS, [100] * 5, strict=True))})
+    decisions = [Decision(d, "AAPL", "Buy") for d in DAYS[:3]]
+    result = simulate(decisions, _config(max_order_pct=0.1), starting_cash=10_000,
+                      end_date="2026-01-09", benchmark=None, closes=prices)
+    # Half the book is the target; 10% of equity a session builds it in steps.
+    assert [f.quantity for f in result.fills] == [10, 10, 10]
+
+
+@pytest.mark.unit
 def test_hold_carries_and_sell_exits():
     prices = _closes({"AAPL": dict(zip(DAYS, [100, 100, 100, 100, 100], strict=True))})
     decisions = [Decision("2026-01-05", "AAPL", "Buy"), Decision("2026-01-06", "AAPL", "Hold"),
@@ -413,9 +424,21 @@ def test_every_order_attempt_gets_its_own_client_order_id(keys):
 def test_an_order_over_the_notional_cap_is_not_sent(keys):
     session = _FakeSession({})
     broker = alpaca.AlpacaBroker(session=session, max_order_notional=1_000)
-    with pytest.raises(BrokerError, match="max_order_notional"):
+    with pytest.raises(BrokerError, match="per-order cap of 1,000"):
         broker.submit(Order("AAPL", "buy", 10), 200.0, "2026-01-05")
     assert session.sent == []
+
+
+@pytest.mark.unit
+def test_the_broker_backstop_also_holds_orders_to_a_share_of_equity(keys):
+    session = _FakeSession({
+        ("GET", "/v2/account"): (200, {"cash": "100000", "equity": "100000", "currency": "USD"}),
+        ("GET", "/v2/positions"): (200, []),
+    })
+    broker = alpaca.AlpacaBroker(session=session, max_order_pct=0.02)
+    broker.portfolio()
+    with pytest.raises(BrokerError, match="per-order cap of 2,000"):
+        broker.submit(Order("AAPL", "buy", 30), 100.0, "2026-01-05")
 
 
 @pytest.mark.unit
@@ -507,6 +530,26 @@ def test_the_plan_shown_for_confirmation_is_already_cut_to_the_notional_cap(keys
     assert steps[0].order == Order("NVDA", "buy", 200) and steps[0].error is None
     assert "max_order_notional" in shown[0] and "buy 200" in shown[0]
     assert [o["qty"] for o in session.orders()] == ["200"]
+
+
+@pytest.mark.unit
+def test_a_large_account_is_capped_at_a_share_of_its_equity_not_a_fixed_sum(keys):
+    # At 20M a Buy targets 2M; the 2% cap lets 400k of it through per session.
+    broker, session = _alpaca(cash=20_000_000, equity=20_000_000, cap=None)
+    config = {"execution": {"max_position_pct": 0.10, "min_trade_pct": 0, "max_order_pct": 0.02}}
+    steps = run_session(["NVDA"], broker, config, trade_date="2026-01-05",
+                        price=lambda t, d: 100.0, graph=_FakeGraph({"NVDA": "Buy"}))
+    assert steps[0].order == Order("NVDA", "buy", 4_000)
+    assert "max_order_pct cap of 2%" in steps[0].note
+    assert [o["qty"] for o in session.orders()] == ["4000"]
+
+
+@pytest.mark.unit
+def test_the_lower_of_the_two_per_order_caps_wins():
+    rules = SizingRules(max_order_pct=0.02)
+    assert order_cap(rules, 1_000_000, max_order_notional=5_000) == (5_000, "max_order_notional cap")
+    assert order_cap(rules, 100_000, max_order_notional=5_000)[0] == 2_000
+    assert order_cap(SizingRules(), 100_000) is None
 
 
 @pytest.mark.unit

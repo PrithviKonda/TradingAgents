@@ -353,8 +353,9 @@ def trade(
     names = [t.strip() for t in tickers.split(",") if t.strip()]
     try:
         kind, chosen = _session_analysts(analysts, asset_type)
-        broker = AlpacaBroker(paper=not live,
-                              max_order_notional=DEFAULT_CONFIG.get("execution", {}).get("max_order_notional"))
+        execution = DEFAULT_CONFIG.get("execution", {})
+        broker = AlpacaBroker(paper=not live, max_order_notional=execution.get("max_order_notional"),
+                              max_order_pct=execution.get("max_order_pct"))
     except (BrokerError, ValueError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None

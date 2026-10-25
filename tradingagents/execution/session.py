@@ -8,8 +8,8 @@ human can look at the whole plan before anything is sent:
    context, so the agents know what is held.
 2. Plan an order per decision from one equity figure, priced at the latest close.
    The plan already holds every limit an order is held to: a buy is cut to the
-   broker's ``max_order_notional`` and to the cash on hand plus what the
-   session's sells free, so what the human approves is what gets sent. A sell
+   per-order cap (``max_order_pct`` of equity, or the broker's
+   ``max_order_notional``) and to the cash on hand plus what the session's sells free, so what the human approves is what gets sent. A sell
    that only reduces a position is never capped, so a grown position can exit.
 3. Ask ``confirm(plan)`` once, then send sells before buys, so the cash a sell
    frees can fund a buy in the same session. A sell that is refused frees
@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Broker, Fill, Order
-from tradingagents.execution.sizing import SizingRules, plan_order
+from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def run_session(
             with contextlib.suppress(Exception):
                 marks[held.ticker.upper()] = price(held.ticker, date)
     equity = broker.equity(marks)
-    cap = getattr(broker, "max_order_notional", None)
+    cap = order_cap(rules, equity, getattr(broker, "max_order_notional", None))
     # Orders still working at the venue (a buy queued overnight) already move
     # the position; a re-run must count them or it orders the same trade again.
     pending: dict[str, float] = {}
@@ -127,8 +127,8 @@ def run_session(
         held = book.position_in(step.ticker)
         current = (held.quantity if held else 0.0) + pending.get(step.ticker, 0.0)
         step.order = plan_order(step.ticker, step.rating, equity, step.price, current, rules)
-        if step.order is not None and cap is not None:
-            step.order, step.note = _within_cap(step.order, step.price, current, cap, rules)
+        if step.order is not None:
+            step.order, step.note = within_cap(step.order, step.price, current, cap, rules)
         if pending.get(step.ticker):
             opened = f"{pending[step.ticker]:+g} already on order"
             step.note = f"{opened}; {step.note}" if step.note else opened
@@ -163,20 +163,6 @@ def _send(broker: Broker, step: SessionStep, date: str) -> None:
 def _units(amount: float, price: float, rules: SizingRules) -> float:
     units = max(amount, 0.0) / price
     return units if rules.allow_fractional else math.floor(units + 1e-9)
-
-
-def _within_cap(order: Order, price: float, current: float, cap: float,
-                rules: SizingRules) -> tuple[Order | None, str | None]:
-    """``order`` cut to ``cap`` in notional; a sell that only reduces the position is exempt."""
-    # Only the part of a sell beyond the position (a short) is held to the cap.
-    reducing = min(order.quantity, max(current, 0.0)) if order.side == "sell" else 0.0
-    if (order.quantity - reducing) * price <= cap + 1e-6:
-        return order, None
-    units = reducing + _units(cap, price, rules)
-    if units <= 0:
-        return None, f"one unit is over the max_order_notional cap of {cap:,.2f}"
-    return (Order(order.ticker, order.side, units),
-            f"cut from {order.quantity:g} by the max_order_notional cap of {cap:,.2f}")
 
 
 def _fund(buys: list[SessionStep], cash: float, rules: SizingRules) -> None:

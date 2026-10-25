@@ -7,6 +7,11 @@ simulator, the paper broker and a real broker all trade the same rule.
 Each rating maps to a fraction of the per-position cap (``max_position_pct`` of
 equity). Hold maps to ``None``: keep whatever is held, rather than rebalancing to
 some invented weight. REVIEW is no decision at all and never trades (#1170).
+
+No single order may exceed the per-order cap: ``max_order_pct`` of equity, and
+a broker's ``max_order_notional`` in dollars where one is set, whichever is
+lower. A larger buy is cut to it, so a position is built over several sessions;
+a sell that only reduces a position is exempt, so it can always exit.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ class SizingRules:
     allow_fractional: bool = False
     # A trade smaller than this share of equity is noise, not a rebalance.
     min_trade_pct: float = 0.005
+    # The largest single order, as a share of equity; None for no such cap.
+    max_order_pct: float | None = None
 
     @classmethod
     def from_config(cls, config: dict) -> SizingRules:
@@ -43,6 +50,8 @@ class SizingRules:
             target_weights=execution.get("target_weights"),
             allow_fractional=bool(execution.get("allow_fractional", False)),
             min_trade_pct=float(execution.get("min_trade_pct", 0.005)),
+            max_order_pct=(float(execution["max_order_pct"])
+                           if execution.get("max_order_pct") is not None else None),
         )
 
     def weights(self) -> dict[str, float]:
@@ -80,3 +89,32 @@ def plan_order(ticker: str, rating: str, equity: float, price: float, current: f
     if target != 0 and abs(delta) * price < rules.min_trade_pct * equity:
         return None
     return Order(ticker=ticker, side="buy" if delta > 0 else "sell", quantity=abs(delta))
+
+
+def order_cap(rules: SizingRules, equity: float,
+              max_order_notional: float | None = None) -> tuple[float, str] | None:
+    """The per-order cap in notional and the setting it comes from, or ``None``."""
+    caps = []
+    if rules.max_order_pct is not None:
+        caps.append((rules.max_order_pct * max(equity, 0.0), f"max_order_pct cap of {rules.max_order_pct:.0%}"))
+    if max_order_notional is not None:
+        caps.append((float(max_order_notional), "max_order_notional cap"))
+    return min(caps, key=lambda c: c[0]) if caps else None
+
+
+def within_cap(order: Order, price: float, current: float, cap: tuple[float, str] | None,
+               rules: SizingRules) -> tuple[Order | None, str | None]:
+    """``order`` cut to ``cap``, with a note saying so; a sell that only reduces is exempt."""
+    if cap is None:
+        return order, None
+    limit, name = cap
+    # Only the part of a sell beyond the position (a short) is held to the cap.
+    reducing = min(order.quantity, max(current, 0.0)) if order.side == "sell" else 0.0
+    if (order.quantity - reducing) * price <= limit + 1e-6:
+        return order, None
+    units = max(limit, 0.0) / price
+    units = reducing + (units if rules.allow_fractional else math.floor(units + 1e-9))
+    if units <= 0:
+        return None, f"one unit is over the {name} ({limit:,.2f})"
+    return (Order(order.ticker, order.side, units),
+            f"cut from {order.quantity:g} by the {name} ({limit:,.2f})")

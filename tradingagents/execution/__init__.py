@@ -17,6 +17,8 @@ from tradingagents.execution.simulator import (
 from tradingagents.execution.sizing import (
     DEFAULT_TARGET_WEIGHTS,
     SizingRules,
+    order_cap,
     plan_order,
     target_quantity,
+    within_cap,
 )

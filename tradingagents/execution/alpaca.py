@@ -54,7 +54,8 @@ def client_order_id(order: Order) -> str:
 
 class AlpacaBroker:
     def __init__(self, paper: bool = True, key_id: str | None = None, secret_key: str | None = None,
-                 max_order_notional: float | None = None, timeout: float = 15.0,
+                 max_order_notional: float | None = None, max_order_pct: float | None = None,
+                 timeout: float = 15.0,
                  session: requests.Session | None = None):
         if not paper and not live_trading_unlocked():
             raise BrokerError(
@@ -69,6 +70,8 @@ class AlpacaBroker:
         self.name = "alpaca-paper" if paper else "alpaca-live"
         self.base_url = PAPER_URL if paper else LIVE_URL
         self.max_order_notional = max_order_notional
+        self.max_order_pct = max_order_pct
+        self._equity: float | None = None      # as last reported, for max_order_pct
         self.timeout = timeout
         self._session = session or requests.Session()
         self._held: dict[str, float] = {}      # positions as last reported, for the cap
@@ -98,6 +101,7 @@ class AlpacaBroker:
         account = self.account()
         positions = self._request("GET", "/v2/positions")
         self._held = {p["symbol"].upper(): float(p["qty"]) for p in positions}
+        self._equity = float(account.get("equity") or account["cash"])
         return PortfolioContext(
             cash=float(account["cash"]),
             currency=account.get("currency", "USD"),
@@ -122,16 +126,23 @@ class AlpacaBroker:
         # Alpaca marks the book itself, with fresher prices than the caller has.
         return float(self.account()["equity"])
 
+    def _order_limit(self) -> float | None:
+        limits = [self.max_order_notional] if self.max_order_notional is not None else []
+        if self.max_order_pct is not None and self._equity is not None:
+            limits.append(self.max_order_pct * max(self._equity, 0.0))
+        return min(limits) if limits else None
+
     def submit(self, order: Order, price: float, date: str) -> Fill:
         # The session already cut the plan to the cap; this is the backstop. A
         # sell that only reduces a reported position is exempt, so it can exit.
         held = max(self._held.get(order.ticker.upper(), 0.0), 0.0)
         capped = order.quantity - min(order.quantity, held) if order.side == "sell" else order.quantity
         notional = order.quantity * price
-        if self.max_order_notional is not None and capped * price > self.max_order_notional + 1e-6:
+        limit = self._order_limit()
+        if limit is not None and capped * price > limit + 1e-6:
             raise BrokerError(
                 f"{order.side} {order.quantity:g} {order.ticker} is about {notional:,.2f}, over the "
-                f"max_order_notional cap of {self.max_order_notional:,.2f}; not sent"
+                f"per-order cap of {limit:,.2f}; not sent"
             )
         placed = self._request("POST", "/v2/orders", json={
             "symbol": order.ticker.upper(),

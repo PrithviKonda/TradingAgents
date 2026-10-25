@@ -29,7 +29,7 @@ from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Fill
 from tradingagents.execution.paper import CostModel, PaperBroker
-from tradingagents.execution.sizing import SizingRules, plan_order
+from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 from tradingagents.memory import TradingMemoryLog
 
 TRADING_DAYS = 252
@@ -166,8 +166,10 @@ def simulate(
         todays = by_session.get(day, {})
         if todays:
             equity = broker.equity(last)
-            orders = [plan_order(t, d.rating, equity, last[t], broker.quantity(t), rules)
-                      for t, d in todays.items()]
+            cap = order_cap(rules, equity)
+            orders = [within_cap(order, last[t], broker.quantity(t), cap, rules)[0]
+                      for t, d in todays.items()
+                      if (order := plan_order(t, d.rating, equity, last[t], broker.quantity(t), rules))]
             # Sells first, so the cash they free can fund the same session's buys.
             for order in sorted(filter(None, orders), key=lambda o: o.side != "sell"):
                 broker.submit(order, last[order.ticker], day.strftime("%Y-%m-%d"))
