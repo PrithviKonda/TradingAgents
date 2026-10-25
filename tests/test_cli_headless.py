@@ -56,7 +56,6 @@ def test_flags_skip_exactly_their_own_steps(monkeypatch):
 
     for step in ("get_ticker", "get_analysis_date", "select_analysts"):
         monkeypatch.setattr(selections, step, no_prompt)
-    monkeypatch.setattr(selections.updates, "enabled", lambda: False)
 
     chosen = selections._prompt_selections({}, FLAGS)
 
@@ -186,7 +185,6 @@ def test_an_unknown_analyst_error_names_the_analysts_as_users_know_them():
 def _selections_with_env(monkeypatch, keys=None):
     for name, value in UNATTENDED_ENV.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(selections.updates, "enabled", lambda: False)
     checked = keys if keys is not None else []
     monkeypatch.setattr(selections, "ensure_api_key", lambda provider: checked.append(provider))
     return checked

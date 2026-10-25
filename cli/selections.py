@@ -8,7 +8,6 @@ import typer
 from rich.align import Align
 from rich.panel import Panel
 
-from cli import updates
 from cli.display import (
     console,
 )
@@ -134,13 +133,7 @@ def _prompt_selections(prefs, flags):
     )
     console.print(Align.center(welcome_box))
     console.print()
-    console.print()  # Add vertical space before announcements
-
-    # What's new comes from a cache refreshed in the background, and only for
-    # someone at a terminal: a run never waits on it and unattended runs skip it.
-    if updates.enabled():
-        updates.show(console)
-        updates.start_background_refresh()
+    console.print()
 
     def create_question_box(title, prompt, default=None):
         box_content = f"[bold]{title}[/bold]\n"
