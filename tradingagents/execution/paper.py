@@ -19,6 +19,11 @@ Every price source here is split-adjusted, so the ledger has to be too: opened
 with a ``splits`` source, the account applies each split since a holding's last
 fill to its units and average price, and records the adjustment, so a 10:1
 split reads as ten times the units at a tenth of the cost, not a 90% loss.
+
+Holdings are keyed by canonical symbol (``normalize_symbol``), so BTCUSD and
+BTC-USD, or 700.HK and 0700.HK, are one position. An account saved before that
+has its keys normalized, and any two holdings of one instrument merged, when it
+is read.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from tradingagents.dataflows.files import locked
+from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.execution.broker import BrokerError, Fill, Order
 from tradingagents.portfolio import PortfolioContext, Position
 
@@ -160,11 +166,13 @@ class PaperBroker:
             self.cash = float(data["cash"])
             self.starting_cash = float(data.get("starting_cash", data["cash"]))
             self.currency = data.get("currency", "USD")
-            self.holdings = {t: _Holding(float(h["quantity"]), float(h["average_price"]))
-                             for t, h in data.get("positions", {}).items()}
-            self.fills = [Fill(**f) for f in data.get("fills", [])]
-            self.adjustments = list(data.get("adjustments", []))
-            self.pending = list(data.get("pending", []))
+            self.holdings = {}
+            for ticker, h in data.get("positions", {}).items():
+                # A key saved before symbols were canonical merges into its instrument.
+                self._apply(normalize_symbol(ticker), float(h["quantity"]), float(h["average_price"]))
+            self.fills = [Fill(**{**f, "ticker": normalize_symbol(f["ticker"])}) for f in data.get("fills", [])]
+            self.adjustments = [{**a, "ticker": normalize_symbol(a["ticker"])} for a in data.get("adjustments", [])]
+            self.pending = [{**p, "ticker": normalize_symbol(p["ticker"])} for p in data.get("pending", [])]
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise BrokerError(f"paper account {self.path} is not readable: {exc}") from exc
 
@@ -194,7 +202,7 @@ class PaperBroker:
     # -- the Broker interface ------------------------------------------------
 
     def quantity(self, ticker: str) -> float:
-        held = self.holdings.get(ticker.upper())
+        held = self.holdings.get(normalize_symbol(ticker))
         return held.quantity if held else 0.0
 
     def portfolio(self) -> PortfolioContext:
@@ -250,7 +258,7 @@ class PaperBroker:
         return result
 
     def _queue(self, order: Order, date: str) -> Fill:
-        ticker = order.ticker.upper()
+        ticker = normalize_symbol(order.ticker)
         self.pending.append({"ticker": ticker, "side": order.side, "quantity": order.quantity, "date": date})
         return Fill(ticker, order.side, order.quantity, None, date=date, status="pending")
 
@@ -275,7 +283,7 @@ class PaperBroker:
         return filled
 
     def _fill(self, order: Order, price: float, date: str) -> Fill:
-        ticker = order.ticker.upper()
+        ticker = normalize_symbol(order.ticker)
         quantity = order.quantity
         held = self.quantity(ticker)
         fill_price = self.costs.fill_price(order.side, price)

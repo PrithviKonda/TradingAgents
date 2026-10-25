@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Broker, Fill, Order
 from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
@@ -89,7 +90,13 @@ def run_session(
     graph = graph or TradingAgentsGraph(list(selected_analysts), config=config)
     rules = SizingRules.from_config(config)
     book = broker.portfolio()
-    steps = [SessionStep(t) for t in dict.fromkeys(t.strip().upper() for t in tickers if t.strip())]
+    # Canonical symbols, so BTCUSD and BTC-USD are one instrument and one
+    # position, not two that each get bought.
+    steps = [SessionStep(t) for t in dict.fromkeys(normalize_symbol(t) for t in tickers if t.strip())]
+    holding: dict[str, float] = {}
+    for held in book.positions:
+        key = normalize_symbol(held.ticker)
+        holding[key] = holding.get(key, 0.0) + held.quantity
 
     for index, step in enumerate(steps, 1):
         if progress:
@@ -102,11 +109,11 @@ def run_session(
             step.error = str(exc)
 
     marks = {s.ticker: s.price for s in steps if s.price}
-    for held in book.positions:
-        if held.ticker.upper() not in marks:
+    for ticker in holding:
+        if ticker not in marks:
             # An unpriced holding is marked at cost by the paper broker.
             with contextlib.suppress(Exception):
-                marks[held.ticker.upper()] = price(held.ticker, date)
+                marks[ticker] = price(ticker, date)
     equity = broker.equity(marks)
     cap = order_cap(rules, equity, getattr(broker, "max_order_notional", None))
     # Orders still working at the venue (a buy queued overnight) already move
@@ -114,7 +121,7 @@ def run_session(
     pending: dict[str, float] = {}
     committed = 0.0
     for order in broker.open_orders() if hasattr(broker, "open_orders") else []:
-        ticker = order.ticker.upper()
+        ticker = normalize_symbol(order.ticker)
         pending[ticker] = pending.get(ticker, 0.0) + order.signed()
         if order.side == "buy":
             if ticker not in marks:
@@ -124,8 +131,7 @@ def run_session(
     for step in steps:
         if step.error or step.price is None:
             continue
-        held = book.position_in(step.ticker)
-        current = (held.quantity if held else 0.0) + pending.get(step.ticker, 0.0)
+        current = holding.get(step.ticker, 0.0) + pending.get(step.ticker, 0.0)
         step.order = plan_order(step.ticker, step.rating, equity, step.price, current, rules)
         if step.order is not None:
             step.order, step.note = within_cap(step.order, step.price, current, cap, rules)

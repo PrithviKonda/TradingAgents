@@ -9,7 +9,12 @@ from rich.markup import escape
 
 from cli.display import console
 from cli.models import AnalystType, AssetType
-from cli.prompts import filter_analysts_for_asset_type, parse_analysts, parse_ticker
+from cli.prompts import (
+    detect_asset_type,
+    filter_analysts_for_asset_type,
+    parse_analysts,
+    parse_ticker,
+)
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.dataflows.symbols import safe_ticker_component
@@ -233,8 +238,15 @@ def simulate(
     _print_simulation(path, cash, max_position, end, benchmark, out)
 
 
-def _session_analysts(analysts: str | None, asset_type: str):
-    kind = AssetType(asset_type.strip().lower())
+def _session_analysts(analysts: str | None, asset_type: str | None, names: list[str]):
+    # Without --asset-type, a session of coins alone runs as crypto, as an
+    # analysis of one does; any stock among them keeps the stock analysts.
+    if asset_type:
+        kind = AssetType(asset_type.strip().lower())
+    elif names and all(detect_asset_type(n) == AssetType.CRYPTO for n in names):
+        kind = AssetType.CRYPTO
+    else:
+        kind = AssetType.STOCK
     chosen = (parse_analysts(analysts, kind) if analysts
               else filter_analysts_for_asset_type(list(AnalystType), kind))
     return kind, [a.value for a in chosen]
@@ -266,7 +278,9 @@ def paper(
     cash: float = typer.Option(None, "--cash", help="Funding for a new account (default: execution.starting_cash)"),
     date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD (default: today)"),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
-    asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
+    asset_type: str = typer.Option(
+        None, "--asset-type", help="stock or crypto (default: crypto when every ticker is a coin)"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but record no fills"),
     status: bool = typer.Option(False, "--status", help="Show the account and exit"),
     settle: bool = typer.Option(False, "--settle", help="Fill pending orders whose next close is in, and exit"),
@@ -293,12 +307,11 @@ def paper(
     if not status:
         _settle_paper(broker)
     if not status and not settle:
-        names = [t.strip() for t in (tickers or "").split(",") if t.strip()]
-        if not names:
-            console.print("[red]No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL[/red]")
-            raise typer.Exit(code=1)
         try:
-            kind, chosen = _session_analysts(analysts, asset_type)
+            names = _tickers(tickers)
+            if not names:
+                raise ValueError("No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL")
+            kind, chosen = _session_analysts(analysts, asset_type, names)
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
@@ -344,15 +357,19 @@ def trade(
     yes: bool = typer.Option(False, "--yes", help="Send the planned orders without asking"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Analyze and plan, but send nothing"),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
-    asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
+    asset_type: str = typer.Option(
+        None, "--asset-type", help="stock or crypto (default: crypto when every ticker is a coin)"
+    ),
 ):
     """Trade at a brokerage: its paper account by default, the live one with --live."""
     if broker_name.strip().lower() != "alpaca":
         console.print(f"[red]Unknown broker {broker_name!r}; supported: alpaca[/red]")
         raise typer.Exit(code=1)
-    names = [t.strip() for t in tickers.split(",") if t.strip()]
     try:
-        kind, chosen = _session_analysts(analysts, asset_type)
+        names = _tickers(tickers)
+        if not names:
+            raise ValueError("No ticker to trade; pass them comma-separated, e.g. NVDA,AAPL")
+        kind, chosen = _session_analysts(analysts, asset_type, names)
         execution = DEFAULT_CONFIG.get("execution", {})
         broker = AlpacaBroker(paper=not live, max_order_notional=execution.get("max_order_notional"),
                               max_order_pct=execution.get("max_order_pct"))
