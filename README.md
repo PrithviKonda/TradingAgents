@@ -75,8 +75,9 @@ This fork adds backtest simulation, paper trading, Alpaca brokerage trading and 
 git clone https://github.com/PrithviKonda/TradingAgents.git && cd TradingAgents
 uv venv --python 3.13 && source .venv/bin/activate     # or: conda create -n tradingagents python=3.13
 uv pip install .                                        # or: pip install .
+uv pip install ".[dashboard]"                           # optional: the dashboard (step 6)
 ```
-The install includes the dashboard and its neural-network models, which bring PyTorch, a download of over 1 GB.
+The dashboard and its neural-network models are the optional `dashboard` extra, because they bring PyTorch, a download of over 1 GB. Everything else works without it.
 
 **2. Add keys.** Copy `.env.example` to `.env` and set the key for your LLM provider, e.g. `OPENAI_API_KEY`. Optional extras: `FRED_API_KEY` for macro data, and `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` for Alpaca.
 
@@ -100,7 +101,7 @@ tradingagents paper NVDA,AAPL           # analyze, size and fill in a local pape
 tradingagents paper --status
 ```
 
-**6. Study it in the dashboard.**
+**6. Study it in the dashboard.** It needs the `dashboard` extra from step 1.
 ```bash
 tradingagents dashboard
 ```
@@ -199,6 +200,11 @@ source .venv/bin/activate
 Install the package and its dependencies (`uv pip install .` with uv):
 ```bash
 pip install .
+```
+
+The quant dashboard is an optional extra, since its models bring PyTorch:
+```bash
+pip install ".[dashboard]"
 ```
 
 ### Docker
@@ -496,13 +502,14 @@ Live trading needs both `--live` and `TRADINGAGENTS_LIVE_TRADING=1`, so neither 
   - **Chronos-Bolt**, Amazon's pretrained time-series transformer, forecasts the price path zero-shot as quantile bands. Its implied probability of a higher close is backtested over past origins, with hit rate, AUC and band coverage.
 
 ```bash
+pip install ".[dashboard]"     # once: Streamlit, Plotly, scikit-learn and Chronos (with PyTorch)
 tradingagents dashboard
 tradingagents dashboard --results-dir ~/.tradingagents/logs --port 8502
 ```
 
 Every metric is defined, with how to read it, in the [dashboard guide](docs/dashboard.md).
 
-Both networks install with TradingAgents. Chronos downloads its weights (about 180 MB) from Hugging Face the first time it forecasts. On daily technical features alone, neither network should be expected to beat a coin flip by much; the Models tab exists to show you whether they do, on your instrument, before you let them inform a trade.
+Both networks install with the `dashboard` extra; without it, `tradingagents dashboard` prints the install command and exits. Chronos downloads its weights (about 180 MB) from Hugging Face the first time it forecasts. On daily technical features alone, neither network should be expected to beat a coin flip by much; the Models tab exists to show you whether they do, on your instrument, before you let them inform a trade.
 
 ## Reproducibility
 

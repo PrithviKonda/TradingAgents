@@ -6,8 +6,11 @@ suite neither downloads a model nor reaches a price vendor.
 
 from __future__ import annotations
 
+import importlib.util
 import math
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -236,6 +239,7 @@ def test_features_never_look_ahead():
 @pytest.mark.unit
 @pytest.mark.parametrize("kind", ["mlp", "logistic"])
 def test_walk_forward_probabilities_are_out_of_sample(kind):
+    pytest.importorskip("sklearn")
     bars = _bars(700)
     cut = bars.index[520]
     changed = bars.copy()
@@ -251,6 +255,7 @@ def test_walk_forward_probabilities_are_out_of_sample(kind):
 
 @pytest.mark.unit
 def test_walk_forward_reports_calibration_and_importance():
+    pytest.importorskip("sklearn")
     result = M.walk_forward(_bars(700), horizon=5, kind="logistic", min_train=252, step=63)
     assert result.calibration["count"].sum() == result.label.notna().sum()
     assert set(result.importance["feature"]) == set(M.technical_features(_bars(50)).columns)
@@ -260,6 +265,7 @@ def test_walk_forward_reports_calibration_and_importance():
 
 @pytest.mark.unit
 def test_walk_forward_refuses_too_little_history():
+    pytest.importorskip("sklearn")
     with pytest.raises(ValueError, match="need at least"):
         M.walk_forward(_bars(260), horizon=5)
 
@@ -327,6 +333,7 @@ class _FakeChronos:
 
 @pytest.mark.unit
 def test_chronos_forecast_shapes_and_probability():
+    pytest.importorskip("torch")
     closes = _series(np.linspace(100, 120, 300))
     forecast = M.chronos_forecast(closes, horizon=10, pipeline=_FakeChronos())
     assert len(forecast.bands) == 10 and {"q10", "q50", "q90", "mean"} <= set(forecast.bands)
@@ -337,6 +344,7 @@ def test_chronos_forecast_shapes_and_probability():
 
 @pytest.mark.unit
 def test_chronos_backtest_sees_only_history_up_to_each_origin():
+    pytest.importorskip("torch")
     closes = _series(np.linspace(100, 160, 300))
     fake = _FakeChronos()
     record = M.chronos_backtest(closes, horizon=5, origins=6, spacing=10, pipeline=fake)
@@ -444,6 +452,8 @@ def test_a_paper_account_replays_across_a_split_in_the_split_adjusted_basis(tmp_
 
 @pytest.mark.unit
 def test_the_app_renders_every_tab_from_saved_artifacts(tmp_path, monkeypatch):
+    pytest.importorskip("streamlit")
+    pytest.importorskip("plotly")
     from streamlit.testing.v1 import AppTest
 
     sim = tmp_path / "simulation"
@@ -468,6 +478,8 @@ def test_the_app_renders_every_tab_from_saved_artifacts(tmp_path, monkeypatch):
 
 def _app(tmp_path, monkeypatch):
     """The app under AppTest, reading ``tmp_path`` with synthetic prices and no model downloads."""
+    pytest.importorskip("streamlit")
+    pytest.importorskip("plotly")
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
@@ -579,3 +591,54 @@ def test_a_tab_that_fails_shows_its_error_and_the_tabs_after_it_render(tmp_path,
     assert [e.message for e in at.exception] == ["no signal", "no signal"]   # Signals, Signal quality
     assert any(s.value == "Analyst reports" for s in at.subheader)
     assert any(b.label == "Train and evaluate" for b in at.button)
+# -- the optional install --------------------------------------------------------------
+
+_DASHBOARD_STACK = ("streamlit", "plotly", "sklearn", "torch", "chronos")
+
+
+def _modules_loaded_by(code: str) -> set[str]:
+    """Run ``code`` in a fresh interpreter and return the dashboard-stack modules it loaded."""
+    probe = f"import sys\n{code}\nprint(' '.join(sorted({{m.split('.')[0] for m in sys.modules}})))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
+                         cwd=Path(__file__).resolve().parents[1]).stdout.split()
+    return set(out) & set(_DASHBOARD_STACK)
+
+
+@pytest.mark.unit
+def test_the_dashboard_stack_is_an_optional_extra():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    names = ("streamlit", "plotly", "scikit-learn", "chronos-forecasting")
+    core = " ".join(project["dependencies"])
+    assert not [n for n in names if n in core]
+    extra = " ".join(project["optional-dependencies"]["dashboard"])
+    assert all(n in extra for n in names)
+
+
+@pytest.mark.unit
+def test_the_cli_and_core_import_without_the_dashboard_stack():
+    assert _modules_loaded_by("import cli.main, tradingagents.execution, tradingagents.dashboard.models") == set()
+
+
+@pytest.mark.unit
+def test_chronos_available_does_not_import_torch(monkeypatch):
+    assert _modules_loaded_by("from tradingagents.dashboard import models\nmodels.chronos_available()") == set()
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "torch" else real(name, *a))
+    assert M.chronos_available() is False
+
+
+@pytest.mark.unit
+def test_the_dashboard_command_asks_for_the_extra_when_streamlit_is_missing(monkeypatch):
+    from typer.testing import CliRunner
+
+    from cli import main
+
+    launched = []
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "streamlit" else real(name, *a))
+    monkeypatch.setattr(subprocess, "call", lambda command, *a, **k: launched.append(command) or 0)
+    result = CliRunner().invoke(main.app, ["dashboard", "--no-browser"])
+    assert result.exit_code == 1
+    assert 'pip install "tradingagents[dashboard]"' in result.output
+    assert launched == []

@@ -17,6 +17,7 @@ Anything with ``fit(X, y)`` and ``predict_proba(X)`` can stand in for the MLP.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import math
 import warnings
 from dataclasses import dataclass, field
@@ -260,12 +261,8 @@ def agreement(fr: pd.DataFrame, probabilities: dict[str, pd.Series], horizon: in
 # -- Chronos ---------------------------------------------------------------------------
 
 def chronos_available() -> bool:
-    try:
-        import chronos  # noqa: F401
-        import torch  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """Whether Chronos and torch are installed, found without importing torch on each page load."""
+    return all(importlib.util.find_spec(name) is not None for name in ("chronos", "torch"))
 
 
 @functools.lru_cache(maxsize=2)

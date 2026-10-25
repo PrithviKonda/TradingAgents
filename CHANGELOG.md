@@ -19,7 +19,7 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 
 ### Upgrading
 
-- `pip install .` now also installs Streamlit, Plotly, scikit-learn and Chronos (with PyTorch), so the dashboard and both networks work out of the box.
+- The dashboard and both networks are the optional `dashboard` extra: `pip install ".[dashboard]"` (or `pip install "tradingagents[dashboard]"`) installs Streamlit, Plotly, scikit-learn and Chronos (with PyTorch). A bare `pip install .` stays lean and installs on Intel Macs under Python 3.13, where PyTorch has no wheels; `tradingagents dashboard` without the extra prints the install command and exits 1. The Docker image leaves the extra out.
 
 ### Changed
 

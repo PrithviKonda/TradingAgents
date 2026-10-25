@@ -432,8 +432,16 @@ def dashboard(
     ),
 ):
     """Open the quant dashboard: trades, signals, research and neural models."""
+    import importlib.util
     import subprocess
     from importlib.resources import files
+
+    # The dashboard stack is the optional `dashboard` extra; say how to get it
+    # rather than let streamlit fail with "No module named streamlit".
+    if importlib.util.find_spec("streamlit") is None:
+        console.print("[red]The dashboard is not installed.[/red] Install its extra with:")
+        console.print(escape('pip install "tradingagents[dashboard]"'), soft_wrap=True)
+        raise typer.Exit(code=1)
 
     app_path = str(files("tradingagents.dashboard").joinpath("app.py"))
     # Streamlit listens on every interface by default; the dashboard shows your
