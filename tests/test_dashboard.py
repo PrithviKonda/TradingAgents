@@ -312,6 +312,14 @@ def test_sources_find_every_artifact(tmp_path):
 
 
 @pytest.mark.unit
+def test_sources_expand_a_home_relative_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sources = S.Sources.from_config({"results_dir": "~/results", "memory_log_path": "~/memory/log.md"})
+    assert (sources.results_dir, sources.memory_log_path) == (tmp_path / "results", tmp_path / "memory" / "log.md")
+    assert S.Sources.from_config({"results_dir": "x"}, "~/other").results_dir == tmp_path / "other"
+
+
+@pytest.mark.unit
 def test_a_saved_simulation_with_no_fills_opens(tmp_path):
     from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.execution import Decision, simulate

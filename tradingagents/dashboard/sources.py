@@ -47,8 +47,10 @@ class Sources:
 
     @classmethod
     def from_config(cls, config: dict, results_dir: str | Path | None = None) -> Sources:
+        # Either may be written "~/...", as in a .env file or on the command line.
         log = config.get("memory_log_path")
-        return cls(Path(results_dir or config["results_dir"]), Path(log) if log else None)
+        return cls(Path(results_dir or config["results_dir"]).expanduser(),
+                   Path(log).expanduser() if log else None)
 
     def paper_accounts(self) -> dict[str, Path]:
         folder = self.results_dir / "paper"
