@@ -12,6 +12,10 @@ No single order may exceed the per-order cap: ``max_order_pct`` of equity, and
 a broker's ``max_order_notional`` in dollars where one is set, whichever is
 lower. A larger buy is cut to it, so a position is built over several sessions;
 a sell that only reduces a position is exempt, so it can always exit.
+
+The book is long-only unless ``allow_short`` is set: a negative target weight
+(the only way a rating asks for a short) is refused when the rules are built,
+and no plan ever sells more than is held.
 """
 
 from __future__ import annotations
@@ -41,6 +45,17 @@ class SizingRules:
     min_trade_pct: float = 0.005
     # The largest single order, as a share of equity; None for no such cap.
     max_order_pct: float | None = None
+    allow_short: bool = False
+
+    def __post_init__(self):
+        if self.allow_short:
+            return
+        short = sorted(r for r, w in (self.target_weights or {}).items() if float(w) < 0)
+        if short:
+            raise ValueError(
+                f"target_weights for {', '.join(short)} are negative, which asks for a short; "
+                "set execution.allow_short to trade short, or use weights of 0 or more"
+            )
 
     @classmethod
     def from_config(cls, config: dict) -> SizingRules:
@@ -52,6 +67,7 @@ class SizingRules:
             min_trade_pct=float(execution.get("min_trade_pct", 0.005)),
             max_order_pct=(float(execution["max_order_pct"])
                            if execution.get("max_order_pct") is not None else None),
+            allow_short=bool(execution.get("allow_short", False)),
         )
 
     def weights(self) -> dict[str, float]:
@@ -82,7 +98,12 @@ def plan_order(ticker: str, rating: str, equity: float, price: float, current: f
                rules: SizingRules) -> Order | None:
     """The order that moves ``current`` units to the rating's target, if any."""
     target = target_quantity(rating, equity, price, current, rules)
-    if target is None or target == current:
+    if target is None:
+        return None
+    if not rules.allow_short:
+        # A long-only book sells at most what it holds, and never sells into a short.
+        target = max(target, min(current, 0.0))
+    if target == current:
         return None
     delta = target - current
     # A full exit always goes through; any other trade below the floor is noise.

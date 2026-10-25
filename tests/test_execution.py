@@ -71,6 +71,24 @@ def test_target_weights_can_be_overridden_per_tier():
     assert target_quantity("Overweight", 100_000, 100.0, 0, rules) == 50
 
 
+@pytest.mark.unit
+def test_a_negative_target_weight_needs_allow_short():
+    # A negative weight is the only way a rating asks for a short.
+    with pytest.raises(ValueError, match="allow_short"):
+        SizingRules.from_config({"execution": {"target_weights": {"Sell": -0.5}}})
+    rules = SizingRules.from_config({"execution": {"target_weights": {"Sell": -0.5}, "allow_short": True}})
+    assert plan_order("AAPL", "Sell", 100_000, 100.0, 0, rules) == Order("AAPL", "sell", 50)
+
+
+@pytest.mark.unit
+def test_a_long_only_plan_never_sells_more_than_is_held():
+    # Rules built around the check still cannot plan a sale beyond the position.
+    rules = SizingRules(max_position_pct=0.10)
+    object.__setattr__(rules, "target_weights", {"Sell": -0.5})
+    assert plan_order("AAPL", "Sell", 100_000, 100.0, 20, rules) == Order("AAPL", "sell", 20)
+    assert plan_order("AAPL", "Sell", 100_000, 100.0, 0, rules) is None
+
+
 # -- paper broker ------------------------------------------------------------------
 
 @pytest.mark.unit
@@ -581,6 +599,16 @@ def test_a_rerun_counts_the_orders_still_open_and_does_not_double_them(keys):
     broker, session = _alpaca(cash=100_000, equity=100_000, open_orders=[queued])
     steps = _alpaca_session(broker, {"NVDA": "Buy"})
     assert steps[0].order is None and "+200 already on order" in steps[0].describe()
+    assert session.orders() == []
+
+
+@pytest.mark.unit
+def test_a_session_sends_no_short_sale_unless_allow_short(keys):
+    broker, session = _alpaca(cash=10_000, equity=10_000)
+    config = {"execution": {"max_position_pct": 0.10, "target_weights": {"Sell": -1.0}}}
+    with pytest.raises(ValueError, match="allow_short"):
+        run_session(["AAPL"], broker, config, trade_date="2026-01-05",
+                    price=lambda t, d: 50.0, graph=_FakeGraph({"AAPL": "Sell"}))
     assert session.orders() == []
 
 
