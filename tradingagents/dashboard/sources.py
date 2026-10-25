@@ -140,30 +140,21 @@ def replay_equity(fills: pd.DataFrame, starting_cash: float, closes, end_date: s
     start = fills["date"].min().strftime("%Y-%m-%d")
     end = end_date or get_current_date()
     prices = {t: closes(t, start, end) for t in fills["ticker"].unique()}
-    calendar = sorted(set().union(*(s.index for s in prices.values())) | set(fills["date"]))
-    calendar = [d for d in calendar if d <= pd.Timestamp(end)]
+    calendar = pd.DatetimeIndex(sorted(set().union(*(s.index for s in prices.values())) | set(fills["date"])))
+    calendar = calendar[calendar <= pd.Timestamp(end)]
 
-    cash, held, curve, cursor = starting_cash, {}, {}, 0
-    rows = fills.to_dict("records")
-    for day in calendar:
-        while cursor < len(rows) and rows[cursor]["date"] <= day:
-            f = rows[cursor]
-            signed = f["quantity"] if f["side"] == "buy" else -f["quantity"]
-            cash -= signed * f["price"] + (f["commission"] or 0.0)
-            held[f["ticker"]] = held.get(f["ticker"], 0.0) + signed
-            cursor += 1
-        value = cash
-        for ticker, quantity in held.items():
-            series = prices[ticker]
-            known = series[series.index <= day]
-            mark = float(known.iloc[-1]) if not known.empty else _last_fill_price(rows[:cursor], ticker)
-            value += quantity * mark
-        curve[day] = value
-    return pd.Series(curve, name="equity")
-
-
-def _last_fill_price(rows: list[dict], ticker: str) -> float:
-    return next((r["price"] for r in reversed(rows) if r["ticker"] == ticker), 0.0)
+    signed = fills["quantity"].where(fills["side"] == "buy", -fills["quantity"])
+    spent = (signed * fills["price"] + fills["commission"].fillna(0.0)).groupby(fills["date"]).sum()
+    value = starting_cash - spent.reindex(calendar, fill_value=0.0).cumsum()
+    for ticker, series in prices.items():
+        mine = fills["ticker"] == ticker
+        held = signed[mine].groupby(fills.loc[mine, "date"]).sum().reindex(calendar, fill_value=0.0).cumsum()
+        # A day with no close yet is marked at the ticker's latest fill.
+        last_fill = fills.loc[mine].groupby("date")["price"].last()
+        mark = series.reindex(calendar.union(series.index)).ffill().reindex(calendar)
+        mark = mark.fillna(last_fill.reindex(calendar).ffill()).fillna(0.0)
+        value = value + held * mark
+    return pd.Series(value.to_numpy(), index=calendar, name="equity")
 
 
 def load_decisions(path: str | Path) -> pd.DataFrame:

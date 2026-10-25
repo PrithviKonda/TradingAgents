@@ -431,6 +431,27 @@ def test_a_paper_account_is_marked_to_market_from_its_fills(tmp_path):
 
 
 @pytest.mark.unit
+def test_replay_marks_an_unpriced_day_at_its_fill_and_reads_a_missing_commission_as_none():
+    fills = pd.DataFrame([
+        {"ticker": "AAPL", "side": "buy", "quantity": 5, "price": 100.0, "commission": float("nan"),
+         "date": pd.Timestamp("2026-01-05")},
+        {"ticker": "MSFT", "side": "buy", "quantity": 2, "price": 50.0, "commission": 1.0,
+         "date": pd.Timestamp("2026-01-06")},
+        {"ticker": "AAPL", "side": "sell", "quantity": 5, "price": 110.0, "commission": 0.0,
+         "date": pd.Timestamp("2026-01-08")},
+    ])
+    prices = {"AAPL": _series([100, 104, 108, 110]), "MSFT": _series([])}   # MSFT never priced
+
+    def closes(ticker, start, end):
+        series = prices[ticker]
+        return series[(series.index >= start) & (series.index <= end)]
+
+    equity = S.replay_equity(fills, 1_000.0, closes, "2026-01-08")
+    # MSFT held at its fill price; the first fill's blank commission costs nothing.
+    assert list(equity) == [1_000, 1_019, 1_039, 1_049]
+
+
+@pytest.mark.unit
 def test_a_paper_account_replays_across_a_split_in_the_split_adjusted_basis(tmp_path):
     path = tmp_path / "paper.json"
     broker = PaperBroker.open(path, starting_cash=10_000, costs=CostModel(slippage_bps=0))
