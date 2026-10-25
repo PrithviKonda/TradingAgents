@@ -58,6 +58,30 @@ def test_sharpe_and_sortino_follow_their_definitions():
 
 
 @pytest.mark.unit
+def test_a_saved_simulation_shows_the_figures_the_simulator_reported(tmp_path):
+    from tradingagents.execution import Decision, simulate
+
+    days = pd.bdate_range("2026-01-05", periods=6)
+    table = {"AAPL": [100, 100, 110, 90, 105, 100], "SPY": [400, 400, 404, 396, 400, 408]}
+
+    def closes(ticker, start, end):
+        series = pd.Series(table[ticker], index=days, dtype=float)
+        return series[(series.index >= start) & (series.index < end)]
+
+    config = {"execution": {"max_position_pct": 0.5, "slippage_bps": 0, "min_trade_pct": 0,
+                            "commission_per_order": 25.0}}
+    result = simulate([Decision("2026-01-05", "AAPL", "Buy")], config, starting_cash=10_000,
+                      end_date="2026-01-12", benchmark="SPY", closes=closes)
+    account = S.load_simulation(result.write(tmp_path / "run"))
+    stats = A.performance(account.equity, account.benchmark, account.starting_cash)
+    for key in ("total_return", "cagr", "volatility", "sharpe", "max_drawdown", "benchmark_return"):
+        assert stats[key] == pytest.approx(result.metrics[key]), key
+    # The first session's commission is a loss from the cash the account started with.
+    assert stats["worst_session"] <= -25 / 10_000
+    assert stats["total_return"] == pytest.approx((5_000 - 25 + 50 * 100) / 10_000 - 1)
+
+
+@pytest.mark.unit
 def test_beta_against_a_benchmark_moved_half_as_much():
     bench_r = np.array([0.01, -0.02, 0.015, 0.005, -0.01, 0.02])
     bench = _series(100 * np.cumprod(np.r_[1, 1 + bench_r]))

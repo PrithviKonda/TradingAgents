@@ -3,7 +3,8 @@
 Pure pandas, no UI, so every figure on screen has a test. Conventions:
 
 - Returns are simple daily returns of the equity curve; annualization uses 252
-  sessions and a zero risk-free rate.
+  sessions and a zero risk-free rate. The headline figures come from
+  ``tradingagents.execution.metrics``, as the simulator's do.
 - A decision is entered at the first close after its date (#1518), as the
   simulator and settlement do, so forward returns here are the returns a
   trade on that decision could actually have had.
@@ -19,9 +20,9 @@ from collections import deque
 import numpy as np
 import pandas as pd
 
+from tradingagents.execution.metrics import TRADING_DAYS, curve_drawdown, curve_returns, curve_stats
 from tradingagents.memory.settlement import benchmark_return
 
-TRADING_DAYS = 252
 RATING_SCORE = {"Buy": 2, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -2}
 RATING_ORDER = list(RATING_SCORE)
 HORIZONS = (1, 5, 10, 20)
@@ -37,42 +38,42 @@ def daily_returns(equity: pd.Series) -> pd.Series:
     return equity.astype(float).pct_change().dropna()
 
 
-def drawdown(equity: pd.Series) -> pd.Series:
+def drawdown(equity: pd.Series, starting_cash: float | None = None) -> pd.Series:
     """Fractional distance below the running peak, 0 at a new high."""
-    return equity / equity.cummax() - 1
+    return curve_drawdown(equity, starting_cash)
 
 
-def longest_drawdown(equity: pd.Series) -> int:
+def longest_drawdown(equity: pd.Series, starting_cash: float | None = None) -> int:
     """Most consecutive sessions spent below a previous peak."""
     longest = run = 0
-    for below in (drawdown(equity) < 0):
+    for below in (drawdown(equity, starting_cash) < 0):
         run = run + 1 if below else 0
         longest = max(longest, run)
     return longest
 
 
-def performance(equity: pd.Series, benchmark: pd.Series | None = None) -> dict:
-    """Headline statistics of an equity curve, and against ``benchmark`` when given."""
+def performance(equity: pd.Series, benchmark: pd.Series | None = None,
+                starting_cash: float | None = None) -> dict:
+    """Headline statistics of an equity curve, and against ``benchmark`` when given.
+
+    With ``starting_cash``, returns are measured from the cash the account
+    started with, so the first session's costs count, and the headline figures
+    match what ``tradingagents simulate`` reports for the same run.
+    """
     equity = equity.dropna().astype(float)
     if len(equity) < 2:
         return {}
-    r = daily_returns(equity)
-    years = max((equity.index[-1] - equity.index[0]).days / 365.25, 1 / 365.25)
-    total = equity.iloc[-1] / equity.iloc[0] - 1
-    vol = r.std(ddof=1) * math.sqrt(TRADING_DAYS) if len(r) > 1 else 0.0
+    r = curve_returns(equity, starting_cash)
+    headline = curve_stats(equity, starting_cash)
     downside = r[r < 0]
     down_vol = math.sqrt((downside ** 2).sum() / len(r)) * math.sqrt(TRADING_DAYS) if len(r) else 0.0
-    cagr = (1 + total) ** (1 / years) - 1 if total > -1 else -1.0
-    max_dd = float(drawdown(equity).min())
+    cagr, max_dd = headline["cagr"], headline["max_drawdown"]
     stats = {
-        "total_return": float(total),
-        "cagr": float(cagr),
-        "volatility": float(vol),
-        "sharpe": float(r.mean() / r.std(ddof=1) * math.sqrt(TRADING_DAYS)) if vol > 0 else 0.0,
+        **{k: headline[k] for k in ("total_return", "cagr", "volatility", "sharpe")},
         "sortino": float(r.mean() * TRADING_DAYS / down_vol) if down_vol > 0 else 0.0,
         "max_drawdown": max_dd,
         "calmar": float(cagr / -max_dd) if max_dd < 0 else 0.0,
-        "longest_drawdown_sessions": longest_drawdown(equity),
+        "longest_drawdown_sessions": longest_drawdown(equity, starting_cash),
         "positive_sessions": float((r > 0).mean()) if len(r) else 0.0,
         "best_session": float(r.max()) if len(r) else 0.0,
         "worst_session": float(r.min()) if len(r) else 0.0,

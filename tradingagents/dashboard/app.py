@@ -253,7 +253,7 @@ def portfolio_page(account: S.Account | None):
     if account is None or account.equity.empty:
         st.info("Pick an account in the sidebar: a saved simulation, a paper account, or simulate a decision log.")
         return
-    stats = A.performance(account.equity, account.benchmark)
+    stats = A.performance(account.equity, account.benchmark, account.starting_cash)
     tiles = [("Total return", pct(stats.get("total_return"))), ("CAGR", pct(stats.get("cagr"))),
              ("Sharpe", num(stats.get("sharpe"))), ("Sortino", num(stats.get("sortino"))),
              ("Max drawdown", pct(stats.get("max_drawdown"))), ("Calmar", num(stats.get("calmar"))),

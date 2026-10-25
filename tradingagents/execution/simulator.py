@@ -15,7 +15,6 @@ changes it. Hold leaves a position as it is; REVIEW never trades.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timedelta
@@ -29,13 +28,12 @@ from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.execution.broker import Fill
+from tradingagents.execution.metrics import curve_stats
 from tradingagents.execution.paper import CostModel, PaperBroker, _Holding
 from tradingagents.execution.sizing import SizingRules, order_cap, plan_order, within_cap
 from tradingagents.memory import TradingMemoryLog
 from tradingagents.memory.settlement import resolve_benchmark
 from tradingagents.portfolio import PortfolioContext, Position
-
-TRADING_DAYS = 252
 
 # closes(ticker, start, end) -> daily closes from start up to, not including, end.
 CloseSource = Callable[[str, str, str], pd.Series]
@@ -244,28 +242,16 @@ def simulate(
 
 def _metrics(curve: pd.Series, broker: PaperBroker, exposure: list[float],
              benchmark: str | None, bench_curve: pd.Series | None) -> dict:
+    # The dashboard computes the same figures with the same function.
     start_value = broker.starting_cash
-    end_value = float(curve.iloc[-1])
-    returns = curve.pct_change().dropna()
-    # Day zero's return is against the cash the account started with.
-    first = pd.Series([float(curve.iloc[0]) / start_value - 1], index=curve.index[:1])
-    returns = pd.concat([first, returns])
-    days = max((curve.index[-1] - curve.index[0]).days, 1)
-    total = end_value / start_value - 1
-    std = float(returns.std(ddof=0)) if len(returns) > 1 else 0.0
-    peak = curve.cummax().clip(lower=start_value)
     filled = [f for f in broker.fills if f.status == "filled"]
     metrics = {
         "start": curve.index[0].strftime("%Y-%m-%d"),
         "end": curve.index[-1].strftime("%Y-%m-%d"),
         "sessions": len(curve),
         "starting_equity": start_value,
-        "ending_equity": round(end_value, 2),
-        "total_return": total,
-        "cagr": (1 + total) ** (365.25 / days) - 1 if total > -1 else -1.0,
-        "volatility": std * math.sqrt(TRADING_DAYS),
-        "sharpe": float(returns.mean()) / std * math.sqrt(TRADING_DAYS) if std > 0 else 0.0,
-        "max_drawdown": float((curve / peak - 1).min()),
+        "ending_equity": round(float(curve.iloc[-1]), 2),
+        **curve_stats(curve, start_value),
         "trades": len(filled),
         "commissions": round(sum(f.commission for f in filled), 2),
         "average_exposure": sum(exposure) / len(exposure) if exposure else 0.0,
